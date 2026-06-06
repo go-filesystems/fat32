@@ -208,7 +208,8 @@ func (fs *fat32FS) WriteFile(path string, data []byte, perm os.FileMode) error {
 	if needsLFN(name) {
 		nLFN = (len(utf16.Encode([]rune(name))) + 12) / 13
 	}
-	slotOff := fat32FindNFreeSlots(buf, nLFN+1)
+	var slotOff int
+	buf, slotOff = fs.ensureDirSlots(buf, nLFN+1)
 	if slotOff < 0 {
 		return fmt.Errorf("fat32: directory is full")
 	}
@@ -246,7 +247,8 @@ func (fs *fat32FS) MkDir(path string, perm os.FileMode) error {
 	if needsLFN(name) {
 		nLFN = (len(utf16.Encode([]rune(name))) + 12) / 13
 	}
-	slotOff := fat32FindNFreeSlots(buf, nLFN+1)
+	var slotOff int
+	buf, slotOff = fs.ensureDirSlots(buf, nLFN+1)
 	if slotOff < 0 {
 		return fmt.Errorf("fat32: directory is full")
 	}
@@ -417,17 +419,23 @@ func (fs *fat32FS) Rename(oldPath, newPath string) error {
 	if newParentCluster != oldParentCluster {
 		destBuf = newBuf
 	}
-	slotOff := fat32FindNFreeSlots(destBuf, nLFN+1)
+	var slotOff int
+	destBuf, slotOff = fs.ensureDirSlots(destBuf, nLFN+1)
 	if slotOff < 0 {
 		return fmt.Errorf("fat32: directory is full")
 	}
 	writeDirEntry(destBuf, slotOff, newName, oldAttr, oldCluster, oldSize)
 	if newParentCluster != oldParentCluster {
+		// destBuf points to the (possibly grown) newBuf; reassign back so the
+		// post-grow buffer is what we persist.
+		newBuf = destBuf
 		if err := fs.writeDirBuf(oldParentCluster, oldBuf); err != nil {
 			return err
 		}
 		return fs.writeDirBuf(newParentCluster, newBuf)
 	}
+	// Same-parent rename: destBuf is the (possibly grown) oldBuf.
+	oldBuf = destBuf
 	return fs.writeDirBuf(oldParentCluster, oldBuf)
 }
 
@@ -595,14 +603,21 @@ func mbrPartOffset(r io.ReaderAt, partIndex int) (int64, error) {
 	return 0, nil
 }
 
+// maxDirClusters caps how many clusters a single directory may occupy.
+// Exposed as a package-level var so tests can shrink it without having to
+// build images millions of cluster-sized entries large.
+var maxDirClusters = 256
+
 // readDirBuf reads the full cluster chain of the directory at startCluster.
 func (fs *fat32FS) readDirBuf(startCluster uint32) ([]byte, error) {
-	const maxDirClusters = 256
 	maxBytes := uint64(maxDirClusters) * uint64(fs.info.ClusterSize())
 	return fs.readClusterChain(startCluster, maxBytes)
 }
 
 // writeDirBuf writes buf back to the cluster chain starting at startCluster.
+// When buf is longer than the existing chain, the chain is extended by
+// allocating fresh clusters from the FAT and linking them in. This makes the
+// root directory (and any subdirectory) grow uniformly past the first cluster.
 func (fs *fat32FS) writeDirBuf(startCluster uint32, buf []byte) error {
 	clusterSize := int64(fs.info.ClusterSize())
 	dataBase := fs.info.DataOffset(fs.partOffset)
@@ -626,10 +641,35 @@ func (fs *fat32FS) writeDirBuf(startCluster uint32, buf []byte) error {
 		if _, err := fs.f.ReadAt(nextEntry[:], fatBase+int64(cluster)*4); err != nil {
 			return fmt.Errorf("fat32: read FAT entry for cluster %d: %w", cluster, err)
 		}
-		cluster = binary.LittleEndian.Uint32(nextEntry[:]) & 0x0FFFFFFF
-		if cluster < 2 || cluster >= 0x0FFFFFF7 {
+		next := binary.LittleEndian.Uint32(nextEntry[:]) & 0x0FFFFFFF
+		if next >= 0x0FFFFFF8 {
+			// End of current chain — extend with a freshly allocated cluster.
+			newCluster, err := fs.allocCluster()
+			if err != nil {
+				return fmt.Errorf("fat32: extend directory chain: %w", err)
+			}
+			if err := fs.setFATEntry(newCluster, 0x0FFFFFFF); err != nil {
+				return err
+			}
+			if err := fs.setFATEntry(cluster, newCluster); err != nil {
+				return err
+			}
+			// Zero the new cluster so that the unused 32-byte slots end with
+			// the 0x00 sentinel byte that directory parsers expect.
+			zeroBuf := make([]byte, clusterSize)
+			newOff := dataBase + int64(newCluster-2)*clusterSize
+			if _, err := fs.f.WriteAt(zeroBuf, newOff); err != nil {
+				return fmt.Errorf("fat32: zero new directory cluster %d: %w", newCluster, err)
+			}
+			cluster = newCluster
+			continue
+		}
+		if next < 2 {
+			// Mirrors the tolerant behaviour in readClusterChain: an out-of-
+			// range FAT pointer terminates the walk silently.
 			break
 		}
+		cluster = next
 	}
 	return nil
 }
@@ -727,6 +767,34 @@ func fat32FindNFreeSlots(buf []byte, n int) int {
 		}
 	}
 	return -1
+}
+
+// ensureDirSlots returns buf, possibly extended by one or more zero-filled
+// clusters, such that it contains at least n consecutive free 32-byte slots.
+// Together with writeDirBuf's chain-extension logic this lets a directory
+// grow past its initial single-cluster footprint.
+//
+// The returned offset is the position of the n-slot run inside the (possibly
+// grown) buffer.
+func (fs *fat32FS) ensureDirSlots(buf []byte, n int) ([]byte, int) {
+	off := fat32FindNFreeSlots(buf, n)
+	if off >= 0 {
+		return buf, off
+	}
+	clusterSize := int(fs.info.ClusterSize())
+	// Grow one cluster at a time until either we fit or we exceed the
+	// safety cap shared with readDirBuf (256 clusters worth of dir buf
+	// by default; tests may shrink this).
+	for {
+		if len(buf) >= maxDirClusters*clusterSize {
+			return buf, -1
+		}
+		buf = append(buf, make([]byte, clusterSize)...)
+		off = fat32FindNFreeSlots(buf, n)
+		if off >= 0 {
+			return buf, off
+		}
+	}
 }
 
 // needsLFN reports whether name requires LFN directory entries because it cannot
@@ -1140,9 +1208,13 @@ func (fs *fat32FS) allocCluster() (uint32, error) {
 	return 0, fmt.Errorf("fat32: no free clusters")
 }
 
-// setFATEntry writes a 32-bit FAT entry for cluster, preserving the upper 4 reserved bits.
+// setFATEntry writes a 32-bit FAT entry for cluster, preserving the upper 4
+// reserved bits, and mirrors the write across every FAT copy declared in the
+// BPB (FAT0, FAT1, …). Keeping the mirror in sync is required for fsck.vfat /
+// fsck_msdos to consider the volume clean.
 func (fs *fat32FS) setFATEntry(cluster uint32, value uint32) error {
 	fatBase := fs.info.FATOffset(fs.partOffset)
+	fatBytes := int64(fs.info.FATSize) * int64(fs.info.BytesPerSector)
 	off := fatBase + int64(cluster)*4
 	var buf [4]byte
 	if _, err := fs.f.ReadAt(buf[:], off); err != nil {
@@ -1150,8 +1222,11 @@ func (fs *fat32FS) setFATEntry(cluster uint32, value uint32) error {
 	}
 	existing := binary.LittleEndian.Uint32(buf[:])
 	binary.LittleEndian.PutUint32(buf[:], (existing&0xF0000000)|(value&0x0FFFFFFF))
-	if _, err := fs.f.WriteAt(buf[:], off); err != nil {
-		return fmt.Errorf("fat32: write FAT entry for cluster %d: %w", cluster, err)
+	for i := uint8(0); i < fs.info.FATCount; i++ {
+		mirrorOff := off + int64(i)*fatBytes
+		if _, err := fs.f.WriteAt(buf[:], mirrorOff); err != nil {
+			return fmt.Errorf("fat32: write FAT%d entry for cluster %d: %w", i, cluster, err)
+		}
 	}
 	return nil
 }

@@ -25,6 +25,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -237,6 +238,53 @@ func TestWriteThenFsckVfat(t *testing.T) {
 		strings.Contains(lc, "had errors") ||
 		strings.Contains(lc, "no fixes were made, but errors were found") {
 		t.Fatalf("%s reported damage:\n%s", filepath.Base(fsck), combined)
+	}
+}
+
+// TestWriteThenFsckVfatMultiClusterRoot writes enough files into the root
+// directory to force the on-disk root chain past one cluster, then runs the
+// canonical fsck tool against the resulting image. This guards against the
+// historical bug where writeDirBuf truncated the chain at cluster 1 — a
+// fresh fsck run on a multi-cluster root is the strongest end-to-end check.
+func TestWriteThenFsckVfatMultiClusterRoot(t *testing.T) {
+	fsck, ok := lookupFsck()
+	if !ok {
+		t.Skip("canonical FAT fsck not found (need dosfstools `fsck.vfat` or macOS `fsck_msdos`)")
+	}
+	path := filepath.Join(t.TempDir(), "out.fat32")
+	// 16 MiB has plenty of room for ~256 LFN root entries plus their data.
+	fs, err := Format(path, 16*1024*1024, FormatConfig{Label: "MULTICLUS"})
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	// 256 long-named files: 1 LFN + 1 short entry each ⇒ 512 slots = 16 KiB =
+	// 4 clusters of directory; well past the prior 1-cluster ceiling.
+	for i := 0; i < 256; i++ {
+		name := fmt.Sprintf("/multi-cluster-root-%04d.dat", i)
+		if err := fs.WriteFile(name, []byte("payload"), 0o644); err != nil {
+			fs.Close()
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	cmd := exec.Command(fsck, "-n", path)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	combined := stdout.String() + stderr.String()
+	t.Logf("%s -n %s exit=%v\n%s", filepath.Base(fsck), path, err, combined)
+	if err != nil {
+		t.Fatalf("%s -n exited non-zero (%v); output above", filepath.Base(fsck), err)
+	}
+	lc := strings.ToLower(combined)
+	if strings.Contains(lc, "filesystem is dirty") ||
+		strings.Contains(lc, "had errors") ||
+		strings.Contains(lc, "no fixes were made, but errors were found") {
+		t.Fatalf("%s reported damage on multi-cluster-root image:\n%s", filepath.Base(fsck), combined)
 	}
 }
 

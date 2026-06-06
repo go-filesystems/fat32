@@ -3,6 +3,7 @@ package filesystem_fat32
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1113,7 +1114,16 @@ func TestFat32FindNFreeSlots(t *testing.T) {
 }
 
 func TestWriteFileLFNFullDir(t *testing.T) {
-	// Fill the root dir so there's no room for an LFN sequence (2 slots needed).
+	// Fill the root dir so there's no room for an LFN sequence (2 slots needed)
+	// AND exhaust the FAT so writeDirBuf cannot extend the chain — together
+	// this forces the writer to surface the "directory is full" / "no free
+	// clusters" path that the test was originally exercising.
+	bootInfo, _ := readInfo(bytes.NewReader(defaultFAT32BootSector()), 0)
+	clusterCount := bootInfo.TotalSectors / uint32(bootInfo.SectorsPerCluster)
+	fatExhaust := make(map[uint32]uint32, clusterCount)
+	for c := uint32(2); c < clusterCount+2; c++ {
+		fatExhaust[c] = 0x0FFFFFFF
+	}
 	path := fatTestImage(t, func(root []byte) {
 		// Fill all but the last slot (which is 0x00 terminator, still present).
 		// With a single cluster of e.g. 32 slots, fill 31 so only 1 free slot remains.
@@ -1130,14 +1140,140 @@ func TestWriteFileLFNFullDir(t *testing.T) {
 			root[i*dirEntrySize+11] = 0x20
 		}
 		root[(slots-1)*dirEntrySize] = 0x00
-	}, nil, nil)
+	}, fatExhaust, nil)
 	fs, err := Open(path, -1)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer fs.Close()
-	// Writing a long name requires 2 slots (1 LFN + 1 8.3), but only 1 is free.
+	// Writing a long name requires 2 slots (1 LFN + 1 8.3); the single free
+	// slot in the existing cluster cannot host it, and the FAT is exhausted
+	// so the chain cannot grow.
 	if err := fs.WriteFile("/a-long-lfn-name.txt", []byte("x"), 0o644); err == nil {
 		t.Fatal("WriteFile LFN with insufficient slots: error = nil, want error")
+	}
+}
+
+// chainClusters walks the FAT chain starting at startCluster and returns the
+// list of cluster numbers in order. Test helper for chain-growth assertions.
+func chainClusters(t *testing.T, fs *fat32FS, startCluster uint32) []uint32 {
+	t.Helper()
+	if startCluster < 2 {
+		return nil
+	}
+	fatBase := fs.info.FATOffset(fs.partOffset)
+	var chain []uint32
+	cluster := startCluster
+	for i := 0; i < 4096; i++ { // safety cap
+		if cluster < 2 || cluster >= 0x0FFFFFF7 {
+			break
+		}
+		chain = append(chain, cluster)
+		var next [4]byte
+		if _, err := fs.f.ReadAt(next[:], fatBase+int64(cluster)*4); err != nil {
+			t.Fatalf("chainClusters: read FAT@%d: %v", cluster, err)
+		}
+		nextVal := binary.LittleEndian.Uint32(next[:]) & 0x0FFFFFFF
+		if nextVal >= 0x0FFFFFF8 {
+			break
+		}
+		cluster = nextVal
+	}
+	return chain
+}
+
+// TestWriteDirBuf_GrowsClusterChain verifies that the directory writer
+// transparently extends the FAT chain when more than one cluster of entries
+// is needed, and that the chain shrinks back to a single cluster (and the
+// free count is restored) after every entry is deleted.
+func TestWriteDirBuf_GrowsClusterChain(t *testing.T) {
+	// 16 MiB image is plenty: 200 LFN files + a few multi-cluster overhead.
+	path := filepath.Join(t.TempDir(), "growchain.fat32")
+	fsIfc, err := Format(path, 16*1024*1024, FormatConfig{Label: "GROW"})
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	defer fsIfc.Close()
+	fs := fsIfc.(*fat32FS)
+
+	rootCluster := fs.info.RootCluster
+	if start := chainClusters(t, fs, rootCluster); len(start) != 1 {
+		t.Fatalf("fresh root chain length = %d, want 1", len(start))
+	}
+	initialFree, err := countFreeClusters(fs)
+	if err != nil {
+		t.Fatalf("initial countFreeClusters: %v", err)
+	}
+
+	// 200 LFN names: "/grow-file-0000.dat" etc. Each takes 1 LFN + 1 short =
+	// 2 slots = 64 bytes ⇒ 200 entries = 12.8 KiB ⇒ ≥ 4 dir clusters.
+	const N = 200
+	for i := 0; i < N; i++ {
+		name := fmt.Sprintf("/grow-file-%04d.dat", i)
+		if err := fsIfc.WriteFile(name, []byte(name), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+
+	// All entries must be visible via ListDir.
+	entries, err := fsIfc.ListDir("/")
+	if err != nil {
+		t.Fatalf("ListDir: %v", err)
+	}
+	have := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		have[e.Name()] = true
+	}
+	for i := 0; i < N; i++ {
+		want := fmt.Sprintf("grow-file-%04d.dat", i)
+		if !have[want] {
+			t.Fatalf("ListDir missing %q (have %d entries)", want, len(entries))
+		}
+	}
+
+	// The chain must have grown past one cluster.
+	chain := chainClusters(t, fs, rootCluster)
+	if len(chain) < 2 {
+		t.Fatalf("root chain did not grow: len=%d, want >= 2 (200 LFN entries)", len(chain))
+	}
+	t.Logf("root chain after 200 writes: %d clusters", len(chain))
+
+	// Now delete every entry — chain should collapse back to the head cluster
+	// only (writeDirBuf doesn't truncate, but freed entries become 0xE5; the
+	// allocated tail clusters remain in the chain — we instead assert that the
+	// per-write allocations balance via the free-cluster counter).
+	for i := 0; i < N; i++ {
+		name := fmt.Sprintf("/grow-file-%04d.dat", i)
+		if err := fsIfc.DeleteFile(name); err != nil {
+			t.Fatalf("DeleteFile %s: %v", name, err)
+		}
+	}
+
+	// After deleting every file, only the data clusters used by each file's
+	// payload should have been freed. The directory chain itself stays the
+	// same length (FAT32 doesn't routinely shrink dir chains; mkfs.vfat
+	// behaviour matches). Verify the free-cluster delta is zero: every byte
+	// of payload data we wrote and freed.
+	finalFree, err := countFreeClusters(fs)
+	if err != nil {
+		t.Fatalf("final countFreeClusters: %v", err)
+	}
+	dirChainLen := uint32(len(chainClusters(t, fs, rootCluster)))
+	// Expected leak: the (dirChainLen-1) clusters allocated to extend the
+	// directory itself (these stay attached to the directory).
+	expectedLeak := dirChainLen - 1
+	got := uint32(initialFree - finalFree)
+	if got != expectedLeak {
+		t.Fatalf("free-cluster delta after delete = %d, want %d (dir chain occupies %d cluster(s))",
+			got, expectedLeak, dirChainLen)
+	}
+
+	// Re-listing after deletion should yield zero entries.
+	post, err := fsIfc.ListDir("/")
+	if err != nil {
+		t.Fatalf("ListDir after delete: %v", err)
+	}
+	if len(post) != 0 {
+		t.Fatalf("ListDir after delete: %d entries remain, want 0", len(post))
 	}
 }

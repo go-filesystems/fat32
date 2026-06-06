@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +31,13 @@ func buildFullRootDirImage(t *testing.T) string {
 		name[2] = byte('0' + i%10)
 		copy(root[i*dirEntrySize:], name[:])
 		root[i*dirEntrySize+11] = 0x20
+	}
+	// Mark every other FAT entry as allocated so allocCluster fails — this
+	// keeps the "directory full" semantic test meaningful now that writeDirBuf
+	// transparently extends the root chain when free clusters are available.
+	clusterCount := info.TotalSectors / uint32(info.SectorsPerCluster)
+	for c := uint32(2); c < clusterCount+2; c++ {
+		binary.LittleEndian.PutUint32(image[fatBase+int(c)*4:], 0x0FFFFFFF)
 	}
 	path := filepath.Join(t.TempDir(), "fat32-fullroot.img")
 	if err := os.WriteFile(path, image, 0o600); err != nil {
@@ -770,6 +778,15 @@ func TestRenameCrossDirDestFull(t *testing.T) {
 		copy(subBuf[i*dirEntrySize:], name[:])
 		subBuf[i*dirEntrySize+11] = 0x20
 	}
+	// Mark every FAT entry as allocated so the chain-extension code path
+	// inside ensureDirSlots cannot grow the destination directory.
+	clusterCount := info.TotalSectors / uint32(info.SectorsPerCluster)
+	for c := uint32(2); c < clusterCount+2; c++ {
+		if c == 3 || c == 4 || c == info.RootCluster {
+			continue
+		}
+		binary.LittleEndian.PutUint32(image[fatBase+int(c)*4:], 0x0FFFFFFF)
+	}
 
 	fs := newMockFSWithErrors(image, info, 0, nil, nil)
 	if err := fs.Rename("/file.txt", "/subdir/moved.txt"); err == nil {
@@ -893,5 +910,199 @@ func TestWriteFileShortName(t *testing.T) {
 	}
 	if string(data) != "short" {
 		t.Fatalf("data = %q, want %q", string(data), "short")
+	}
+}
+
+// withMaxDirClusters temporarily shrinks the package-level maxDirClusters cap
+// so the "directory grew past the cap" branch is testable without building
+// gigantic dir chains.
+func withMaxDirClusters(t *testing.T, n int) {
+	t.Helper()
+	old := maxDirClusters
+	maxDirClusters = n
+	t.Cleanup(func() { maxDirClusters = old })
+}
+
+// TestEnsureDirSlotsCap covers the slotOff < 0 branch of ensureDirSlots
+// (and the surfacing "directory is full" error in WriteFile / MkDir).
+func TestEnsureDirSlotsCap(t *testing.T) {
+	withMaxDirClusters(t, 1)
+	// Pre-fill the single root cluster with allocated entries so the only
+	// way to fit a new entry is to grow — but the cap forbids growth.
+	bootInfo, _ := readInfo(bytes.NewReader(defaultFAT32BootSector()), 0)
+	cs := int(bootInfo.ClusterSize())
+	slots := cs / dirEntrySize
+	path := fatTestImage(t, func(root []byte) {
+		for i := 0; i < slots; i++ {
+			var name [11]byte
+			for k := range name {
+				name[k] = ' '
+			}
+			name[0] = byte('A' + i%26)
+			name[1] = byte('0' + (i/26)%10)
+			name[2] = byte('0' + i%10)
+			copy(root[i*dirEntrySize:], name[:])
+			root[i*dirEntrySize+11] = 0x20
+		}
+	}, nil, nil)
+	fs := openTestFS(t, path)
+	if err := fs.WriteFile("/extra.txt", []byte("x"), 0o644); err == nil ||
+		!strings.Contains(err.Error(), "directory is full") {
+		t.Fatalf("WriteFile beyond cap: err = %v, want \"directory is full\"", err)
+	}
+	if err := fs.MkDir("/extradir", 0o755); err == nil ||
+		!strings.Contains(err.Error(), "directory is full") {
+		t.Fatalf("MkDir beyond cap: err = %v, want \"directory is full\"", err)
+	}
+}
+
+// TestRenameDestFullBeyondCap covers the Rename slotOff < 0 branch.
+func TestRenameDestFullBeyondCap(t *testing.T) {
+	withMaxDirClusters(t, 1)
+	// Root dir holds one file "A.TXT" plus the maximum number of dummy
+	// entries that fill the rest of the cluster, leaving no free slot for
+	// the rename target — and the cap prevents extension.
+	bootInfo, _ := readInfo(bytes.NewReader(defaultFAT32BootSector()), 0)
+	cs := int(bootInfo.ClusterSize())
+	slots := cs / dirEntrySize
+	path := fatTestImage(t, func(root []byte) {
+		writeFAT32ShortEntrySized(root[0:32], "A       TXT", 0x20, 3, 5)
+		// Fill all remaining slots so there is zero free space for the rename.
+		for i := 1; i < slots; i++ {
+			var name [11]byte
+			for k := range name {
+				name[k] = ' '
+			}
+			name[0] = byte('A' + i%26)
+			name[1] = byte('0' + (i/26)%10)
+			name[2] = byte('0' + i%10)
+			copy(root[i*dirEntrySize:], name[:])
+			root[i*dirEntrySize+11] = 0x20
+		}
+	}, map[uint32]uint32{3: 0x0FFFFFFF}, nil)
+	fs := openTestFS(t, path)
+	if err := fs.Rename("/A.TXT", "/renamed-to-a-much-longer-lfn-name.txt"); err == nil ||
+		!strings.Contains(err.Error(), "directory is full") {
+		t.Fatalf("Rename beyond cap: err = %v, want \"directory is full\"", err)
+	}
+}
+
+// TestWriteDirBufExtendAllocCluster_Err exercises the allocCluster error path
+// inside the chain-extension branch of writeDirBuf.
+func TestWriteDirBufExtendAllocCluster_Err(t *testing.T) {
+	image := make([]byte, 1024*1024)
+	boot := defaultFAT32BootSector()
+	copy(image, boot)
+	info, _ := readInfo(bytes.NewReader(boot), 0)
+	fatBase := int(info.FATOffset(0))
+	// Root cluster is EOC; every other FAT slot is marked allocated.
+	binary.LittleEndian.PutUint32(image[fatBase+int(info.RootCluster)*4:], 0x0FFFFFFF)
+	clusterCount := info.TotalSectors / uint32(info.SectorsPerCluster)
+	for c := uint32(2); c < clusterCount+2; c++ {
+		if c == info.RootCluster {
+			continue
+		}
+		binary.LittleEndian.PutUint32(image[fatBase+int(c)*4:], 0x0FFFFFFF)
+	}
+	fs := newMockFSWithErrors(image, info, 0, nil, nil)
+	cs := int(info.ClusterSize())
+	buf := make([]byte, cs*2) // forces writeDirBuf to seek a second cluster
+	if err := fs.writeDirBuf(info.RootCluster, buf); err == nil ||
+		!strings.Contains(err.Error(), "extend directory chain") {
+		t.Fatalf("writeDirBuf extend-with-exhausted-FAT: err = %v, want \"extend directory chain\"", err)
+	}
+}
+
+// TestWriteDirBufExtendSetFATEntry_Err exercises the setFATEntry error paths
+// taken when the chain is being extended.
+func TestWriteDirBufExtendSetFATEntry_Err(t *testing.T) {
+	image := make([]byte, 1024*1024)
+	boot := defaultFAT32BootSector()
+	copy(image, boot)
+	info, _ := readInfo(bytes.NewReader(boot), 0)
+	fatBase := int(info.FATOffset(0))
+	binary.LittleEndian.PutUint32(image[fatBase+int(info.RootCluster)*4:], 0x0FFFFFFF)
+	cs := int(info.ClusterSize())
+	// allocCluster will find cluster 3 (the first zero entry after root).
+	// Fail the WriteAt for the new-cluster EOC marker.
+	newClusterFATOff := int64(fatBase) + 3*4
+	fs := newMockFSWithErrors(image, info, 0, nil, func(off int64) error {
+		if off == newClusterFATOff {
+			return errors.New("inject: setFATEntry(new, EOC) failed")
+		}
+		return nil
+	})
+	buf := make([]byte, cs*2)
+	if err := fs.writeDirBuf(info.RootCluster, buf); err == nil {
+		t.Fatal("writeDirBuf setFATEntry(new, EOC) error = nil, want error")
+	}
+}
+
+// TestWriteDirBufExtendLinkPrev_Err exercises the setFATEntry error path when
+// linking the previous cluster to the freshly allocated one.
+func TestWriteDirBufExtendLinkPrev_Err(t *testing.T) {
+	image := make([]byte, 1024*1024)
+	boot := defaultFAT32BootSector()
+	copy(image, boot)
+	info, _ := readInfo(bytes.NewReader(boot), 0)
+	fatBase := int(info.FATOffset(0))
+	binary.LittleEndian.PutUint32(image[fatBase+int(info.RootCluster)*4:], 0x0FFFFFFF)
+	cs := int(info.ClusterSize())
+	// Fail the WriteAt that links the existing root cluster (2) to the newly
+	// allocated cluster (3). The new-cluster EOC write must succeed first.
+	rootFATOff := int64(fatBase) + int64(info.RootCluster)*4
+	newClusterFATOff := int64(fatBase) + 3*4
+	fs := newMockFSWithErrors(image, info, 0, nil, func(off int64) error {
+		// Allow the EOC write for the new cluster; fail the link-back to root.
+		if off == rootFATOff && off != newClusterFATOff {
+			return errors.New("inject: link prev cluster failed")
+		}
+		return nil
+	})
+	buf := make([]byte, cs*2)
+	if err := fs.writeDirBuf(info.RootCluster, buf); err == nil {
+		t.Fatal("writeDirBuf setFATEntry(prev, new) error = nil, want error")
+	}
+}
+
+// TestWriteDirBufExtendZeroNewCluster_Err exercises the WriteAt error path
+// when zero-filling the freshly allocated directory cluster.
+func TestWriteDirBufExtendZeroNewCluster_Err(t *testing.T) {
+	image := make([]byte, 1024*1024)
+	boot := defaultFAT32BootSector()
+	copy(image, boot)
+	info, _ := readInfo(bytes.NewReader(boot), 0)
+	fatBase := int(info.FATOffset(0))
+	binary.LittleEndian.PutUint32(image[fatBase+int(info.RootCluster)*4:], 0x0FFFFFFF)
+	cs := int(info.ClusterSize())
+	newClusterDataOff := info.DataOffset(0) + int64(3-2)*int64(cs)
+	fs := newMockFSWithErrors(image, info, 0, nil, func(off int64) error {
+		if off == newClusterDataOff {
+			return errors.New("inject: zero new cluster failed")
+		}
+		return nil
+	})
+	buf := make([]byte, cs*2)
+	if err := fs.writeDirBuf(info.RootCluster, buf); err == nil ||
+		!strings.Contains(err.Error(), "zero new directory cluster") {
+		t.Fatalf("writeDirBuf zero-new-cluster error = %v, want \"zero new directory cluster\"", err)
+	}
+}
+
+// TestWriteDirBufCorruptChainTolerated covers the "next < 2" tolerated-break
+// branch (this matches readClusterChain's permissive semantics).
+func TestWriteDirBufCorruptChainTolerated(t *testing.T) {
+	image := make([]byte, 1024*1024)
+	boot := defaultFAT32BootSector()
+	copy(image, boot)
+	info, _ := readInfo(bytes.NewReader(boot), 0)
+	fatBase := int(info.FATOffset(0))
+	// FAT[root] = 1 (< 2, invalid). writeDirBuf must terminate silently.
+	binary.LittleEndian.PutUint32(image[fatBase+int(info.RootCluster)*4:], 1)
+	fs := newMockFSWithErrors(image, info, 0, nil, nil)
+	cs := int(info.ClusterSize())
+	buf := make([]byte, cs*2)
+	if err := fs.writeDirBuf(info.RootCluster, buf); err != nil {
+		t.Fatalf("writeDirBuf next<2: %v, want nil (tolerated)", err)
 	}
 }

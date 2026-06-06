@@ -352,11 +352,23 @@ func TestStressFAT32MaxFileSizeField(t *testing.T) {
 // performance degrades with chain length, and LFN entries consume 1+N
 // slots each — the test verifies the directory grows as required and
 // every file is independently readable.
+//
+// When FAT32_STRESS_LONG=1 the floor is raised to 5000 root-dir entries:
+// the prior single-cluster root saturated at ~51 LFN files; the in-package
+// writeDirBuf chain-extension fix removes that ceiling and we now assert
+// the new lower bound to catch any regression.
 func TestStressManyFiles(t *testing.T) {
 	knobs := loadStressKnobs(t)
 	target := knobs.files
 	if knobs.short && target > 2048 {
 		target = 2048
+	}
+	longMode := os.Getenv("FAT32_STRESS_LONG") == "1"
+	// We expect >= 5000 root-dir files in long mode. The loop sends ~1/5 of
+	// writes into subdirectories, so we need to schedule ~6250 to guarantee
+	// 5000 root entries (plus a small margin).
+	if longMode && target < 6500 {
+		target = 6500
 	}
 
 	// Estimate: ~3 LFN entries per file (LFN_NAME = "lfn-12345.dat" is
@@ -379,9 +391,11 @@ func TestStressManyFiles(t *testing.T) {
 
 	start := time.Now()
 	written := 0
+	rootWritten := 0
 	for i := 0; i < target; i++ {
 		var name string
-		if i%5 == 0 {
+		inRoot := i%5 != 0
+		if !inRoot {
 			name = fmt.Sprintf("/d%d/file-%05d.dat", i%subdirs, i)
 		} else {
 			name = fmt.Sprintf("/file-lfn-%05d.dat", i)
@@ -399,6 +413,9 @@ func TestStressManyFiles(t *testing.T) {
 			t.Fatalf("WriteFile %s: %v", name, err)
 		}
 		written++
+		if inRoot {
+			rootWritten++
+		}
 	}
 	writeDur := time.Since(start)
 
@@ -421,8 +438,16 @@ func TestStressManyFiles(t *testing.T) {
 			t.Fatalf("ReadFile %s = %q, want %q", name, got, want)
 		}
 	}
-	t.Logf("many files: created=%d (target=%d) write_total=%s files/sec=%.0f",
-		written, target, writeDur, float64(written)/writeDur.Seconds())
+	t.Logf("many files: created=%d (root=%d, target=%d) write_total=%s files/sec=%.0f",
+		written, rootWritten, target, writeDur, float64(written)/writeDur.Seconds())
+
+	if longMode {
+		const minRoot = 5000
+		if rootWritten < minRoot {
+			t.Fatalf("FAT32_STRESS_LONG: expected >= %d root-dir files, got %d "+
+				"(writeDirBuf chain extension regression?)", minRoot, rootWritten)
+		}
+	}
 }
 
 // ─── Test 4: Cluster allocation stress ────────────────────────────────────
