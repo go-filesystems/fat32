@@ -1,0 +1,37 @@
+# Canonical-tool FAT32 fixture
+#
+# Source image: image.fat32.gz (gzip of a 32 MiB FAT32 volume).
+# Built on macOS with mtools `mformat` (FAT32 minimum cluster count
+# of ~65525 makes 32 MiB the smallest legal volume — newfs_msdos and
+# mkfs.vfat agree). The compressed fixture is ~33 KiB on disk and
+# expands to 33 554 432 bytes.
+#
+# Reproduce locally (mtools >= 4):
+#
+#   dd if=/dev/zero of=image.img bs=1024 count=1024
+#   cat > .mtoolsrc <<'EOF'
+#   drive z: file="image.img"
+#   mtools_skip_check=1
+#   EOF
+#   MTOOLSRC=.mtoolsrc mformat -F -v TESTFAT32 -C \
+#                              -t 128 -h 16 -n 32 -c 1 \
+#                              -N DEADBEEF z:
+#   printf "Hello from mkfs FAT32 test!\n"                                 > hello.txt
+#   printf "Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n"    > notes.txt
+#   printf "Second line for FAT32 testing.\n"                             >> notes.txt
+#   MTOOLSRC=.mtoolsrc mcopy hello.txt z:/HELLO.TXT
+#   MTOOLSRC=.mtoolsrc mcopy notes.txt z:/NOTES.TXT
+#   gzip -9 image.img
+#   mv image.img.gz testdata/mkfs/image.fat32.gz
+#
+# Properties that TestReadMkfsImage asserts:
+#
+#   volume-label  = "TESTFAT32"
+#   volume-id     = 0xDEADBEEF
+#   total-bytes   = 33554432
+#   sectors       = 65536  (512 bytes/sector)
+#   files
+#     /HELLO.TXT  28 bytes, sha256
+#                 0fb70af07b4a82c32af7bf602d3e9bb533ba3b3b9c55aec030a3880e93d8f319
+#     /NOTES.TXT  88 bytes, sha256
+#                 9a616954bcb237e505134e9cfa512e90983b22c5b2dc651191b35042b6dffb1c
