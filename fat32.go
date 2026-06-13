@@ -15,6 +15,7 @@ const (
 	sectorSize       = 512
 	dirEntrySize     = 32
 	fatAttrReadOnly  = 0x01
+	fatAttrVolumeID  = 0x08
 	fatAttrDirectory = 0x10
 	fatAttrLongName  = 0x0F
 	fatModeDir       = 0o040755
@@ -113,7 +114,15 @@ func Open(imagePath string, partIndex int) (filesystem.Filesystem, error) {
 }
 
 // Close releases the underlying file handle.
-func (fs *fat32FS) Close() error { return fs.f.Close() }
+// Close flushes the FSInfo free-cluster summary (kept lazily, recomputed from
+// the FAT here) and closes the backing file. Syncing once at Close keeps the
+// summary fsck-clean without an O(n) FAT scan on every mutation. The sync is
+// best-effort — FSInfo is an advisory hint, and a partial/synthetic image may
+// not have a full FAT region to scan — so a sync failure does not fail Close.
+func (fs *fat32FS) Close() error {
+	_ = fs.syncFSInfo()
+	return fs.f.Close()
+}
 
 // Info returns the decoded boot-sector metadata.
 func (fs *fat32FS) Info() Info { return fs.info }
@@ -266,8 +275,15 @@ func (fs *fat32FS) MkDir(path string, perm os.FileMode) error {
 	binary.LittleEndian.PutUint16(clusterBuf[26:28], uint16(cluster))
 	copy(clusterBuf[32:43], []byte("..         "))
 	clusterBuf[43] = fatAttrDirectory
-	binary.LittleEndian.PutUint16(clusterBuf[52:54], uint16(parentCluster>>16))
-	binary.LittleEndian.PutUint16(clusterBuf[58:60], uint16(parentCluster))
+	// FAT convention: when the parent is the root directory, the ".." entry's
+	// cluster must be 0, not the root's actual cluster number — fsck.fat flags
+	// "Invalid '..' entry" otherwise.
+	dotdotCluster := parentCluster
+	if parentCluster == fs.info.RootCluster {
+		dotdotCluster = 0
+	}
+	binary.LittleEndian.PutUint16(clusterBuf[52:54], uint16(dotdotCluster>>16))
+	binary.LittleEndian.PutUint16(clusterBuf[58:60], uint16(dotdotCluster))
 	clusterOff := fs.info.DataOffset(fs.partOffset) + int64(cluster-2)*int64(fs.info.ClusterSize())
 	if _, err := fs.f.WriteAt(clusterBuf, clusterOff); err != nil {
 		return fmt.Errorf("fat32: write directory cluster: %w", err)
@@ -1041,6 +1057,13 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 			lfnChars = append(chars[:n], lfnChars...)
 			continue
 		}
+		// Skip the volume-label entry (ATTR_VOLUME_ID): it is filesystem
+		// metadata, not a real directory entry, and must not appear in
+		// listings. (LFN entries, attr 0x0F, are already handled above.)
+		if entry[11]&fatAttrVolumeID != 0 {
+			lfnChars = nil
+			continue
+		}
 		var name string
 		if len(lfnChars) > 0 {
 			name = string(utf16.Decode(lfnChars))
@@ -1193,6 +1216,52 @@ func (fs *fat32FS) writeData(data []byte) (uint32, error) {
 }
 
 // allocCluster scans the FAT and returns the first free cluster number (≥ 2).
+// dataClusterCount returns the number of usable data clusters (clusters
+// 2..count+1), i.e. excluding the reserved and FAT regions — the count fsck
+// uses, not the looser TotalSectors/SectorsPerCluster upper bound.
+func (fs *fat32FS) dataClusterCount() uint32 {
+	dataSectors := int64(fs.info.TotalSectors) -
+		int64(fs.info.ReservedSectors) -
+		int64(fs.info.FATCount)*int64(fs.info.FATSize)
+	if dataSectors < 0 {
+		return 0
+	}
+	return uint32(dataSectors / int64(fs.info.SectorsPerCluster))
+}
+
+// syncFSInfo recomputes the FSInfo free-cluster count and next-free hint from
+// the FAT and writes them back. The allocator only updates FAT entries, so
+// without this the FSInfo summary drifts and fsck.fat reports "Free cluster
+// summary wrong". Call after any operation that allocates or frees clusters.
+func (fs *fat32FS) syncFSInfo() error {
+	fatBase := fs.info.FATOffset(fs.partOffset)
+	dataClusters := fs.dataClusterCount()
+	var free, firstFree uint32 = 0, 0xFFFFFFFF
+	var buf [4]byte
+	for c := uint32(2); c < dataClusters+2; c++ {
+		if _, err := fs.f.ReadAt(buf[:], fatBase+int64(c)*4); err != nil {
+			return fmt.Errorf("fat32: syncFSInfo read FAT: %w", err)
+		}
+		if binary.LittleEndian.Uint32(buf[:])&0x0FFFFFFF == 0 {
+			free++
+			if firstFree == 0xFFFFFFFF {
+				firstFree = c
+			}
+		}
+	}
+	fsiOff := fs.partOffset + int64(fs.info.FSInfoSector)*int64(fs.info.BytesPerSector)
+	sec := make([]byte, fs.info.BytesPerSector)
+	if _, err := fs.f.ReadAt(sec, fsiOff); err != nil {
+		return fmt.Errorf("fat32: syncFSInfo read: %w", err)
+	}
+	binary.LittleEndian.PutUint32(sec[488:], free)
+	binary.LittleEndian.PutUint32(sec[492:], firstFree)
+	if _, err := fs.f.WriteAt(sec, fsiOff); err != nil {
+		return fmt.Errorf("fat32: syncFSInfo write: %w", err)
+	}
+	return nil
+}
+
 func (fs *fat32FS) allocCluster() (uint32, error) {
 	clusterCount := fs.info.TotalSectors / uint32(fs.info.SectorsPerCluster)
 	fatBase := fs.info.FATOffset(fs.partOffset)
