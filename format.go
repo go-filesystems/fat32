@@ -150,12 +150,15 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 	}
 
 	// ── FSInfo sector ────────────────────────────────────────────────────────
+	// Data cluster count (clusters 2..dataClusters+1). The root directory
+	// occupies cluster 2, so one cluster is in use at format time.
+	dataClusters := (dataSectors - 2*fatSizeSectors) / fmtSectorsPerCluster
 	fsinfo := make([]byte, fmtBytesPerSector)
-	le.PutUint32(fsinfo[0:], 0x41615252)   // lead signature
-	le.PutUint32(fsinfo[484:], 0x61417272) // structure signature
-	le.PutUint32(fsinfo[488:], 0xFFFFFFFF) // free count: unknown
-	le.PutUint32(fsinfo[492:], 0xFFFFFFFF) // next free: unknown
-	le.PutUint32(fsinfo[508:], 0xAA550000) // trail signature
+	le.PutUint32(fsinfo[0:], 0x41615252)               // lead signature
+	le.PutUint32(fsinfo[484:], 0x61417272)             // structure signature
+	le.PutUint32(fsinfo[488:], uint32(dataClusters-1)) // free count (root cluster used)
+	le.PutUint32(fsinfo[492:], 3)                      // next-free hint (after root cluster 2)
+	le.PutUint32(fsinfo[508:], 0xAA550000)             // trail signature
 	if _, err := f.WriteAt(fsinfo, int64(fmtFSInfoSector)*fmtBytesPerSector); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("fat32: format: write FSInfo: %w", err)
@@ -173,6 +176,28 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 		if _, err := f.WriteAt(fatEntry, fatOff); err != nil {
 			f.Close()
 			return nil, fmt.Errorf("fat32: format: write FAT %d: %w", i, err)
+		}
+	}
+
+	// Volume-label directory entry. When a label is set, FAT requires a
+	// matching ATTR_VOLUME_ID entry in the root directory; the boot-sector
+	// label alone makes fsck.fat report a missing root-directory label.
+	labelSet := false
+	for i := 0; i < len(label); i++ {
+		if label[i] != ' ' {
+			labelSet = true
+			break
+		}
+	}
+	if labelSet {
+		clusterSize := int64(fmtBytesPerSector * fmtSectorsPerCluster)
+		rootBuf := make([]byte, clusterSize)
+		copy(rootBuf[0:11], label)
+		rootBuf[11] = fatAttrVolumeID
+		dataOffset := int64(fmtReservedSectors+fmtFATCount*fatSizeSectors) * fmtBytesPerSector
+		if _, err := f.WriteAt(rootBuf, dataOffset); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("fat32: format: write root volume label: %w", err)
 		}
 	}
 
