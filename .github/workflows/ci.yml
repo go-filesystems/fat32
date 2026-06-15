@@ -1,0 +1,178 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Native runners: full vet + build + test (race + coverage), exactly as a
+  # developer runs it locally. The full (non-short) suite runs here because
+  # the heavy stress/resize cycles are too slow under QEMU emulation.
+  native:
+    name: native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-latest
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - name: Checkout fat32
+        uses: actions/checkout@v4
+        with:
+          path: fat32
+
+      # go.mod carries `replace github.com/go-filesystems/interface =>
+      # ../interface`, so the sibling module must sit next to this one.
+      - name: Checkout interface (sibling replace target)
+        uses: actions/checkout@v4
+        with:
+          repository: go-filesystems/interface
+          path: interface
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: fat32/go.mod
+
+      - name: Vet
+        working-directory: fat32
+        run: go vet -mod=mod ./...
+
+      - name: Build
+        working-directory: fat32
+        run: go build -mod=mod ./...
+
+      - name: Test (race + coverage)
+        working-directory: fat32
+        run: go test -mod=mod -race -coverprofile=cover.out -covermode=atomic ./...
+
+      - name: Enforce coverage gate
+        working-directory: fat32
+        run: |
+          set -euo pipefail
+          pct=$(go tool cover -func=cover.out | awk '/^total:/ {sub(/%/,"",$3); print $3}')
+          echo "total coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit (p+0 >= 99.0) ? 0 : 1 }' \
+            || { echo "coverage ${pct}% below gate 99.0%"; exit 1; }
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.arch }}
+          path: fat32/cover.out
+          if-no-files-found: ignore
+
+  # Emulated runners: cross-compile a static (CGO_ENABLED=0) test binary and
+  # run it under QEMU for each non-native 64-bit arch. s390x is big-endian,
+  # which exercises the FAT32 byte-order handling: every on-disk structure
+  # (boot sector, FSInfo, FAT entries, directory entries / LFN, cluster
+  # pointers) is decoded with explicit binary.LittleEndian, so reads stay
+  # host-endianness-independent. QEMU runs the short suite — the heavy
+  # stress/resize cycles (testing.Short()) are reserved for the native jobs.
+  emulated:
+    name: emulated ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            image: debian:trixie
+            qemu: rv64,v=true,vlen=128
+          - arch: loong64
+            image: ghcr.io/loong64/debian:trixie
+            qemu: la464
+          - arch: ppc64le
+            image: debian:trixie
+            qemu: power9
+          - arch: s390x
+            image: debian:trixie
+            qemu: qemu
+    steps:
+      - name: Checkout fat32
+        uses: actions/checkout@v4
+        with:
+          path: fat32
+
+      - name: Checkout interface (sibling replace target)
+        uses: actions/checkout@v4
+        with:
+          repository: go-filesystems/interface
+          path: interface
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: fat32/go.mod
+
+      - name: Register QEMU binfmt handlers
+        run: docker run --rm --privileged tonistiigi/binfmt --install all
+
+      - name: Cross-compile per-package test binaries
+        working-directory: fat32
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tests
+          for pkg in $(go list ./...); do
+            name=$(echo "$pkg" | tr '/' '_')
+            # Skip packages without test files (go test -c emits no binary).
+            go test -c -cover -o "/tmp/tests/${name}.test" "$pkg"
+            if [ -f "/tmp/tests/${name}.test" ]; then
+              echo "built ${name}.test"
+            fi
+          done
+          # Fixture-dependent tests resolve paths relative to the package dir
+          # (e.g. testdata/mkfs/image.fat32.gz). The test binaries run with
+          # cwd=/tmp/tests under QEMU, so stage testdata alongside them.
+          cp -a testdata /tmp/tests/testdata
+          ls -la /tmp/tests
+
+      - name: Run test binaries under QEMU (${{ matrix.arch }})
+        env:
+          QEMU_CPU: ${{ matrix.qemu }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bins=(/tmp/tests/*.test)
+          if [ ${#bins[@]} -eq 0 ]; then
+            echo "no test binaries to run"; exit 0
+          fi
+          rc=0
+          for bin in "${bins[@]}"; do
+            echo "::group::$(basename "$bin")"
+            # --user 1000:1000 — drop root so permission-sensitive tests behave
+            # as they do for an unprivileged developer (root bypasses 0o000 etc.).
+            # -test.short — skip the heavy stress/resize cycles under emulation.
+            if ! docker run --rm \
+              --platform linux/${{ matrix.arch }} \
+              -e QEMU_CPU="${QEMU_CPU}" \
+              --user 1000:1000 \
+              -v /tmp/tests:/t -w /t \
+              ${{ matrix.image }} \
+              "./$(basename "$bin")" -test.short -test.v; then
+              rc=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $rc
