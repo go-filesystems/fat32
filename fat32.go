@@ -1069,14 +1069,18 @@ func needsLFN(name string) bool {
 	return shortName(short[:]) != name
 }
 
-// makeShortAlias generates a unique-ish 8.3 alias for a long filename using the
-// tilde notation (e.g. "LONGFI~1" + ext).
-func makeShortAlias(name string) [11]byte {
+// makeShortAlias generates an 8.3 alias for a long filename using the tilde
+// notation (e.g. "LONGFI~1" + ext), guaranteed not to collide with any short
+// name already present in taken. FAT requires every 8.3 short name in a
+// directory to be unique; without the uniqueness check every long name sharing
+// the same first characters would alias to "BASE~1.EXT" and fsck.fat would
+// report "Duplicate directory entry" for each one.
+//
+// The numeric suffix grows as needed: ~1..~9, then the stem is shortened to
+// keep the suffix within the 8-character short-name field (e.g. "LONGF~10",
+// "LON~100"), matching the canonical Windows/Linux numeric-tail scheme.
+func makeShortAlias(name string, taken map[[11]byte]bool) [11]byte {
 	upper := strings.ToUpper(name)
-	var result [11]byte
-	for i := range result {
-		result[i] = ' '
-	}
 	dot := strings.LastIndex(upper, ".")
 	var base, ext string
 	if dot >= 0 {
@@ -1093,17 +1097,60 @@ func makeShortAlias(name string) [11]byte {
 		}
 	}
 	base = clean.String()
-	if len(base) > 6 {
-		base = base[:6]
+	if len(ext) > 3 {
+		ext = ext[:3]
 	}
-	base = base + "~1"
-	for i := 0; i < 8 && i < len(base); i++ {
-		result[i] = base[i]
+
+	for n := 1; ; n++ {
+		suffix := "~" + fmt.Sprintf("%d", n)
+		// The stem (before the tilde) plus the suffix must fit in 8 chars.
+		stemLen := 8 - len(suffix)
+		if stemLen < 1 {
+			stemLen = 1
+		}
+		stem := base
+		if len(stem) > stemLen {
+			stem = stem[:stemLen]
+		}
+		shortBase := stem + suffix
+
+		var result [11]byte
+		for i := range result {
+			result[i] = ' '
+		}
+		for i := 0; i < 8 && i < len(shortBase); i++ {
+			result[i] = shortBase[i]
+		}
+		for i := 0; i < 3 && i < len(ext); i++ {
+			result[8+i] = ext[i]
+		}
+		if taken == nil || !taken[result] {
+			return result
+		}
 	}
-	for i := 0; i < 3 && i < len(ext); i++ {
-		result[8+i] = ext[i]
+}
+
+// collectShortNames returns the set of 8.3 short names already present in a
+// directory buffer (skipping free, deleted, LFN, and volume-label slots) so a
+// new alias can be chosen that does not collide with any of them.
+func collectShortNames(buf []byte) map[[11]byte]bool {
+	taken := make(map[[11]byte]bool)
+	for offset := 0; offset+dirEntrySize <= len(buf); offset += dirEntrySize {
+		b0 := buf[offset]
+		if b0 == 0x00 {
+			break
+		}
+		if b0 == 0xE5 {
+			continue
+		}
+		if buf[offset+11] == fatAttrLongName {
+			continue
+		}
+		var short [11]byte
+		copy(short[:], buf[offset:offset+11])
+		taken[short] = true
 	}
-	return result
+	return taken
 }
 
 // lfnChecksum computes the FAT LFN checksum of an 8.3 short name entry.
@@ -1126,7 +1173,9 @@ func writeDirEntry(buf []byte, slotOff int, name string, attr byte, cluster uint
 	N := 0
 	if needsLFN(name) {
 		N = (len(nameWords) + 12) / 13
-		short = makeShortAlias(name)
+		// The 8.3 alias must be unique within the directory, so derive it
+		// against the short names already written into buf.
+		short = makeShortAlias(name, collectShortNames(buf))
 	} else {
 		short = toShortNameBytes(name)
 	}
