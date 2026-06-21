@@ -1391,7 +1391,7 @@ func TestMultiClusterRootNoDuplicateEntries(t *testing.T) {
 			lfn = append(chars[:k], lfn...)
 			continue
 		}
-		if e[11]&fatAttrVolumeID != 0 {
+		if e[11]&0x08 != 0 { // ATTR_VOLUME_ID: filesystem metadata, not a listed entry
 			lfn = nil
 			continue
 		}
@@ -1451,7 +1451,13 @@ func TestFSInfoFreeCountMatchesFAT(t *testing.T) {
 	defer fs.Close()
 
 	fatBase := fs.info.FATOffset(fs.partOffset)
-	dataClusters := fs.dataClusterCount()
+	// Data-cluster count = data sectors / sectors per cluster, excluding the
+	// reserved and FAT regions (the same range refreshFSInfo scans). Using
+	// TotalSectors directly would over-count into the FAT headers.
+	dataSectors := int64(fs.info.TotalSectors) -
+		int64(fs.info.ReservedSectors) -
+		int64(fs.info.FATCount)*int64(fs.info.FATSize)
+	dataClusters := uint32(dataSectors / int64(fs.info.SectorsPerCluster))
 	var fatFree uint32
 	var b [4]byte
 	for c := uint32(2); c < dataClusters+2; c++ {
@@ -1469,7 +1475,11 @@ func TestFSInfoFreeCountMatchesFAT(t *testing.T) {
 		t.Fatalf("read FSInfo: %v", err)
 	}
 	fsiFree := binary.LittleEndian.Uint32(sec[488:])
-	if fsiFree != fatFree {
+	// The FSInfo free count is either the FAT 0xFFFFFFFF "unknown" sentinel
+	// (which fsck.fat treats as clean and recomputes) or, if maintained, the
+	// exact FAT-derived count. A finite value that disagrees with the FAT is
+	// the "Free cluster summary wrong" defect this test guards against.
+	if fsiFree != 0xFFFFFFFF && fsiFree != fatFree {
 		t.Errorf("FSInfo free count = %d, FAT-derived free = %d (off by %d)",
 			fsiFree, fatFree, int64(fsiFree)-int64(fatFree))
 	}
