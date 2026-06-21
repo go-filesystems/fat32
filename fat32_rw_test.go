@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestReadFile(t *testing.T) {
@@ -1053,16 +1054,46 @@ func TestNeedsLFN(t *testing.T) {
 }
 
 func TestMakeShortAlias(t *testing.T) {
-	alias := makeShortAlias("longfilename.txt")
+	alias := makeShortAlias("longfilename.txt", nil)
 	name := shortName(alias[:])
 	if name != "LONGFI~1.TXT" {
 		t.Errorf("makeShortAlias(longfilename.txt) = %q, want %q", name, "LONGFI~1.TXT")
 	}
 	// No extension
-	alias2 := makeShortAlias("nodotname")
+	alias2 := makeShortAlias("nodotname", nil)
 	name2 := shortName(alias2[:])
 	if name2 != "NODOTN~1" {
 		t.Errorf("makeShortAlias(nodotname) = %q, want %q", name2, "NODOTN~1")
+	}
+}
+
+// TestMakeShortAliasUnique verifies that makeShortAlias dodges short names that
+// are already taken: long names sharing a stem must alias to distinct 8.3
+// names (~1, ~2, …) so the directory never contains a duplicate short name.
+func TestMakeShortAliasUnique(t *testing.T) {
+	taken := make(map[[11]byte]bool)
+	want := []string{"LONGFI~1.TXT", "LONGFI~2.TXT", "LONGFI~3.TXT"}
+	for i, w := range want {
+		alias := makeShortAlias("longfilename.txt", taken)
+		got := shortName(alias[:])
+		if got != w {
+			t.Fatalf("alias #%d = %q, want %q", i, got, w)
+		}
+		if taken[alias] {
+			t.Fatalf("alias #%d %q collides with an already-taken name", i, got)
+		}
+		taken[alias] = true
+	}
+	// Past ~9 the stem must shrink to keep the suffix inside the 8-char field.
+	// taken already holds ~1..~3; allocate ~4..~9, then the 10th alias must be
+	// "LONGF~10.TXT" (six-char stem can no longer fit, so it drops to five).
+	for i := 0; i < 6; i++ {
+		taken[makeShortAlias("longfilename.txt", taken)] = true
+	}
+	alias := makeShortAlias("longfilename.txt", taken)
+	got := shortName(alias[:])
+	if got != "LONGF~10.TXT" {
+		t.Errorf("10th alias = %q, want %q", got, "LONGF~10.TXT")
 	}
 }
 
@@ -1275,5 +1306,181 @@ func TestWriteDirBuf_GrowsClusterChain(t *testing.T) {
 	}
 	if len(post) != 0 {
 		t.Fatalf("ListDir after delete: %d entries remain, want 0", len(post))
+	}
+}
+
+// walkRootDirChain reads every cluster of the root directory by following the
+// on-disk FAT chain (not the parser's 0x00 sentinel), so a regression that
+// leaves stale or duplicated entries in a later cluster is still observed.
+func walkRootDirChain(t *testing.T, fs *fat32FS) []byte {
+	t.Helper()
+	fatBase := fs.info.FATOffset(fs.partOffset)
+	dataBase := fs.info.DataOffset(fs.partOffset)
+	clusterSize := int64(fs.info.ClusterSize())
+	var out []byte
+	cluster := fs.info.RootCluster
+	for cluster >= 2 && cluster < 0x0FFFFFF7 {
+		cbuf := make([]byte, clusterSize)
+		if _, err := fs.f.ReadAt(cbuf, dataBase+int64(cluster-2)*clusterSize); err != nil {
+			t.Fatalf("read root cluster %d: %v", cluster, err)
+		}
+		out = append(out, cbuf...)
+		var ne [4]byte
+		if _, err := fs.f.ReadAt(ne[:], fatBase+int64(cluster)*4); err != nil {
+			t.Fatalf("read FAT entry %d: %v", cluster, err)
+		}
+		next := binary.LittleEndian.Uint32(ne[:]) & 0x0FFFFFFF
+		if next >= 0x0FFFFFF8 {
+			break
+		}
+		cluster = next
+	}
+	return out
+}
+
+// TestMultiClusterRootNoDuplicateEntries guards the historical multi-cluster
+// root regression where every long-named file aliased to the same 8.3 short
+// name (BASE~1.EXT), so fsck.fat reported a "Duplicate directory entry" per
+// file. It asserts — without invoking fsck — that across the whole root-dir
+// cluster chain every live 8.3 short name (and every long name) appears exactly
+// once.
+func TestMultiClusterRootNoDuplicateEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "multi.fat32")
+	fsi, err := Format(path, 16*1024*1024, FormatConfig{Label: "MULTICLUS"})
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	fs := fsi.(*fat32FS)
+	const n = 120
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("/multi-cluster-root-%04d.dat", i)
+		if err := fs.WriteFile(name, []byte("payload"), 0o644); err != nil {
+			fs.Close()
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+
+	buf := walkRootDirChain(t, fs)
+	if len(buf) <= int(fs.info.ClusterSize()) {
+		t.Fatalf("root dir did not span multiple clusters (len=%d, cluster=%d)",
+			len(buf), fs.info.ClusterSize())
+	}
+
+	// Count live 8.3 short names and decoded long names across the full chain.
+	shortCounts := make(map[string]int)
+	longCounts := make(map[string]int)
+	var lfn []uint16
+	for off := 0; off+dirEntrySize <= len(buf); off += dirEntrySize {
+		e := buf[off : off+dirEntrySize]
+		switch e[0] {
+		case 0x00, 0xE5:
+			lfn = nil
+			continue
+		}
+		if e[11] == fatAttrLongName {
+			var chars [13]uint16
+			k := 0
+			for _, p := range []int{1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30} {
+				c := binary.LittleEndian.Uint16(e[p:])
+				if c == 0x0000 || c == 0xFFFF {
+					break
+				}
+				chars[k] = c
+				k++
+			}
+			lfn = append(chars[:k], lfn...)
+			continue
+		}
+		if e[11]&0x08 != 0 { // ATTR_VOLUME_ID: filesystem metadata, not a listed entry
+			lfn = nil
+			continue
+		}
+		shortCounts[shortName(e)]++
+		if len(lfn) > 0 {
+			longCounts[string(utf16.Decode(lfn))]++
+		}
+		lfn = nil
+	}
+
+	for name, c := range shortCounts {
+		if c != 1 {
+			t.Errorf("8.3 short name %q appears %d times (want exactly 1)", name, c)
+		}
+	}
+	for name, c := range longCounts {
+		if c != 1 {
+			t.Errorf("long name %q appears %d times (want exactly 1)", name, c)
+		}
+	}
+	for i := 0; i < n; i++ {
+		want := fmt.Sprintf("multi-cluster-root-%04d.dat", i)
+		if longCounts[want] != 1 {
+			t.Errorf("long name %q appears %d times (want exactly 1)", want, longCounts[want])
+		}
+	}
+	if err := fs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestFSInfoFreeCountMatchesFAT asserts that after a fresh Format + WriteFile +
+// Close, the FSInfo free-cluster summary (offset 488) equals the count derived
+// by walking the FAT over the data-cluster range. This is the invariant fsck.fat
+// checks as "Free cluster summary wrong"; keeping it locked in Go catches any
+// off-by-one in the FSInfo accounting without needing fsck.
+func TestFSInfoFreeCountMatchesFAT(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fsinfo.fat32")
+	fsi, err := Format(path, 16*1024*1024, FormatConfig{Label: "FSINFO"})
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	if err := fsi.WriteFile("/hello.txt", []byte("hello world"), 0o644); err != nil {
+		fsi.Close()
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := fsi.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen and compare the stored FSInfo free count to the live FAT scan.
+	fsi2, err := Open(path, -1)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	fs := fsi2.(*fat32FS)
+	defer fs.Close()
+
+	fatBase := fs.info.FATOffset(fs.partOffset)
+	// Data-cluster count = data sectors / sectors per cluster, excluding the
+	// reserved and FAT regions (the same range refreshFSInfo scans). Using
+	// TotalSectors directly would over-count into the FAT headers.
+	dataSectors := int64(fs.info.TotalSectors) -
+		int64(fs.info.ReservedSectors) -
+		int64(fs.info.FATCount)*int64(fs.info.FATSize)
+	dataClusters := uint32(dataSectors / int64(fs.info.SectorsPerCluster))
+	var fatFree uint32
+	var b [4]byte
+	for c := uint32(2); c < dataClusters+2; c++ {
+		if _, err := fs.f.ReadAt(b[:], fatBase+int64(c)*4); err != nil {
+			t.Fatalf("read FAT entry %d: %v", c, err)
+		}
+		if binary.LittleEndian.Uint32(b[:])&0x0FFFFFFF == 0 {
+			fatFree++
+		}
+	}
+
+	fsiOff := fs.partOffset + int64(fs.info.FSInfoSector)*int64(fs.info.BytesPerSector)
+	sec := make([]byte, fs.info.BytesPerSector)
+	if _, err := fs.f.ReadAt(sec, fsiOff); err != nil {
+		t.Fatalf("read FSInfo: %v", err)
+	}
+	fsiFree := binary.LittleEndian.Uint32(sec[488:])
+	// The FSInfo free count is either the FAT 0xFFFFFFFF "unknown" sentinel
+	// (which fsck.fat treats as clean and recomputes) or, if maintained, the
+	// exact FAT-derived count. A finite value that disagrees with the FAT is
+	// the "Free cluster summary wrong" defect this test guards against.
+	if fsiFree != 0xFFFFFFFF && fsiFree != fatFree {
+		t.Errorf("FSInfo free count = %d, FAT-derived free = %d (off by %d)",
+			fsiFree, fatFree, int64(fsiFree)-int64(fatFree))
 	}
 }
