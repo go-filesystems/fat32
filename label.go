@@ -59,8 +59,78 @@ func (fs *fat32FS) SetLabel(label string) error {
 		}
 	}
 
+	// Keep the root-directory volume-label entry in sync with the BPB label.
+	// Canonical fsck tools require the two to agree (a BPB label with no root
+	// entry, or a stale root entry, is flagged as an error).
+	if err := fs.syncVolumeLabelEntry(padded); err != nil {
+		return fmt.Errorf("fat32 SetLabel: %w", err)
+	}
+
 	fs.info.VolumeLabel = strings.TrimRight(string(padded), " \x00")
 	return nil
+}
+
+// syncVolumeLabelEntry rewrites (or creates) the ATTR_VOLUME_ID entry in the
+// root directory so it matches the 11-byte, space-padded label. When the label
+// is all-spaces (cleared), any existing volume-label entry is deleted.
+func (fs *fat32FS) syncVolumeLabelEntry(padded []byte) error {
+	buf, err := fs.readDirBuf(fs.info.RootCluster)
+	if err != nil {
+		return err
+	}
+
+	wantEmpty := true
+	for _, c := range padded {
+		if c != ' ' {
+			wantEmpty = false
+			break
+		}
+	}
+
+	// Locate an existing volume-label entry, the first free slot, and stop at
+	// end-of-directory (0x00) so a new entry lands in a valid position.
+	existing := -1
+	freeSlot := -1
+	for off := 0; off+dirEntrySize <= len(buf); off += dirEntrySize {
+		b0 := buf[off]
+		if b0 == 0x00 {
+			if freeSlot < 0 {
+				freeSlot = off
+			}
+			break
+		}
+		if b0 == 0xE5 {
+			if freeSlot < 0 {
+				freeSlot = off
+			}
+			continue
+		}
+		attr := buf[off+11]
+		if attr != fatAttrLongName && attr&fatAttrVolumeID != 0 {
+			existing = off
+			break
+		}
+	}
+
+	switch {
+	case wantEmpty:
+		if existing < 0 {
+			return nil // nothing to clear
+		}
+		buf[existing] = 0xE5 // mark deleted
+	case existing >= 0:
+		copy(buf[existing:existing+11], padded)
+	default:
+		if freeSlot < 0 {
+			return fmt.Errorf("no free slot for volume-label entry")
+		}
+		for i := freeSlot; i < freeSlot+dirEntrySize; i++ {
+			buf[i] = 0
+		}
+		copy(buf[freeSlot:freeSlot+11], padded)
+		buf[freeSlot+11] = fatAttrVolumeID
+	}
+	return fs.writeDirBuf(fs.info.RootCluster, buf)
 }
 
 // writeLabelAt rewrites the 11-byte label slot inside the boot sector

@@ -45,6 +45,17 @@ var formatRandUint32 = func() uint32 {
 
 var formatOpenFS = Open
 
+// hasNonSpace reports whether s contains any byte other than ASCII space,
+// i.e. whether the (space-padded) label carries an actual volume name.
+func hasNonSpace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' {
+			return true
+		}
+	}
+	return false
+}
+
 // Format creates a new FAT32 filesystem in the file at path.
 // The file is created (or truncated) and formatted. sizeBytes must be a
 // multiple of the cluster size (4096) and large enough to hold the reserved
@@ -173,6 +184,24 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 		if _, err := f.WriteAt(fatEntry, fatOff); err != nil {
 			f.Close()
 			return nil, fmt.Errorf("fat32: format: write FAT %d: %w", i, err)
+		}
+	}
+
+	// ── Root-directory volume-label entry ────────────────────────────────────
+	// When a label is set in the BPB, canonical fsck tools (dosfstools
+	// fsck.fat >= 4.2) require a matching ATTR_VOLUME_ID (0x08) entry as the
+	// first record of the root directory; a boot-sector label with no root
+	// entry is reported as an error and makes `fsck -n` exit non-zero. Mirror
+	// the space-padded BPB label into the root cluster so the volume is clean.
+	if hasNonSpace(label) {
+		dataOff := int64(fmtReservedSectors+fmtFATCount*fatSizeSectors) * fmtBytesPerSector
+		rootOff := dataOff + int64(fmtRootCluster-2)*clusterSize
+		var volEntry [dirEntrySize]byte
+		copy(volEntry[0:11], label) // already space-padded to 11 bytes
+		volEntry[11] = fatAttrVolumeID
+		if _, err := f.WriteAt(volEntry[:], rootOff); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("fat32: format: write volume-label entry: %w", err)
 		}
 	}
 

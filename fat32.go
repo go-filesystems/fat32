@@ -41,6 +41,7 @@ const (
 	sectorSize       = 512
 	dirEntrySize     = 32
 	fatAttrReadOnly  = 0x01
+	fatAttrVolumeID  = 0x08
 	fatAttrDirectory = 0x10
 	fatAttrLongName  = 0x0F
 	fatModeDir       = 0o040755
@@ -979,6 +980,14 @@ func fat32FindEntry(buf []byte, name string) (int, int, bool) {
 			lfnChars = append(chars[:n], lfnChars...)
 			continue
 		}
+		// Skip the volume-label entry (ATTR_VOLUME_ID): it is not a file and
+		// must not match a lookup by name.
+		if entry[11]&fatAttrVolumeID != 0 {
+			lfnChars = nil
+			lfnStart = -1
+			lfnCount = 0
+			continue
+		}
 		// 8.3 short entry
 		var entryName string
 		if len(lfnChars) > 0 {
@@ -1144,6 +1153,9 @@ func collectShortNames(buf []byte) map[[11]byte]bool {
 			continue
 		}
 		if buf[offset+11] == fatAttrLongName {
+			continue
+		}
+		if buf[offset+11]&fatAttrVolumeID != 0 {
 			continue
 		}
 		var short [11]byte
@@ -1363,6 +1375,12 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 				n++
 			}
 			lfnChars = append(chars[:n], lfnChars...)
+			continue
+		}
+		// The volume-label entry (ATTR_VOLUME_ID) is filesystem metadata, not a
+		// file; skip it so it never surfaces in ListDir/Stat.
+		if entry[11]&fatAttrVolumeID != 0 {
+			lfnChars = nil
 			continue
 		}
 		var name string
