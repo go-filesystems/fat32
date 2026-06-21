@@ -6,10 +6,36 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf16"
 
 	filesystem "github.com/go-filesystems/interface"
 )
+
+// timeNow returns the wall-clock time stamped into newly written directory
+// entries. It is a package var so tests can pin it to a fixed instant.
+var timeNow = time.Now
+
+// fatEpochDate is the FAT date word for 1980-01-01 (the FAT epoch): the value
+// used for entries whose time predates the format's representable range.
+const fatEpochDate uint16 = (1 << 5) | 1 // month=1, day=1, year=0 (1980)
+
+// encodeFATDateTime encodes t into the FAT 16-bit date and time words plus the
+// creation tenth-of-a-second byte. FAT stores local wall-clock time with
+// 2-second resolution. Times before 1980 clamp to the FAT epoch.
+//
+//	date: bits 15..9 = year-1980, 8..5 = month (1-12), 4..0 = day (1-31)
+//	tod:  bits 15..11 = hour, 10..5 = minute, 4..0 = seconds/2
+func encodeFATDateTime(t time.Time) (date, tod uint16, tenth uint8) {
+	t = t.Local()
+	if t.Year() < 1980 {
+		return fatEpochDate, 0, 0
+	}
+	date = uint16(t.Year()-1980)<<9 | uint16(t.Month())<<5 | uint16(t.Day())
+	tod = uint16(t.Hour())<<11 | uint16(t.Minute())<<5 | uint16(t.Second()/2)
+	tenth = uint8((t.Second()%2)*100 + t.Nanosecond()/10_000_000)
+	return date, tod, tenth
+}
 
 const (
 	sectorSize       = 512
@@ -384,6 +410,10 @@ func (fs *fat32FS) Rename(oldPath, newPath string) error {
 		uint32(binary.LittleEndian.Uint16(old8dot3[26:28]))
 	oldAttr := old8dot3[11]
 	oldSize := binary.LittleEndian.Uint32(old8dot3[28:32])
+	// Snapshot the source entry so the rename preserves its timestamps rather
+	// than restamping them to "now" (POSIX rename leaves mtime untouched). The
+	// backing bytes get cleared when the old slots are marked deleted below.
+	oldStamp := append([]byte(nil), old8dot3...)
 
 	var newBuf []byte
 	if newParentCluster == oldParentCluster {
@@ -425,6 +455,11 @@ func (fs *fat32FS) Rename(oldPath, newPath string) error {
 		return fmt.Errorf("fat32: directory is full")
 	}
 	writeDirEntry(destBuf, slotOff, newName, oldAttr, oldCluster, oldSize)
+	// Preserve the original creation / write / last-access timestamps; only
+	// the name (and possibly parent) changed. writeDirEntry stamped "now".
+	new8 := slotOff + nLFN*dirEntrySize
+	copy(destBuf[new8+13:new8+20], oldStamp[13:20]) // CrtTimeTenth, CrtTime, CrtDate, LstAccDate
+	copy(destBuf[new8+22:new8+26], oldStamp[22:26]) // WrtTime, WrtDate
 	if newParentCluster != oldParentCluster {
 		// destBuf points to the (possibly grown) newBuf; reassign back so the
 		// post-grow buffer is what we persist.
@@ -904,6 +939,16 @@ func writeDirEntry(buf []byte, slotOff int, name string, attr byte, cluster uint
 	}
 	copy(buf[e8:e8+11], short[:])
 	buf[e8+11] = attr
+	// Creation / write / last-access timestamps. Without these the entry shows
+	// an invalid 1980-00-00 date that fsck.fat and Windows flag; callers that
+	// must preserve an existing timestamp (rename) overwrite these after.
+	date, tod, tenth := encodeFATDateTime(timeNow())
+	buf[e8+13] = tenth              // CrtTimeTenth
+	le.PutUint16(buf[e8+14:], tod)  // CrtTime
+	le.PutUint16(buf[e8+16:], date) // CrtDate
+	le.PutUint16(buf[e8+18:], date) // LstAccDate (date only)
+	le.PutUint16(buf[e8+22:], tod)  // WrtTime
+	le.PutUint16(buf[e8+24:], date) // WrtDate
 	le.PutUint16(buf[e8+20:], uint16(cluster>>16))
 	le.PutUint16(buf[e8+26:], uint16(cluster))
 	le.PutUint32(buf[e8+28:], size)
