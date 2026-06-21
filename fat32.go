@@ -119,6 +119,9 @@ var (
 // Verify implementation of the common filesystem interface.
 var _ filesystem.Filesystem = (*fat32FS)(nil)
 
+// Verify implementation of the optional in-place truncation interface.
+var _ filesystem.Truncater = (*fat32FS)(nil)
+
 // Open opens imagePath, optionally selecting a partition, and parses the FAT32 BPB.
 func Open(imagePath string, partIndex int) (filesystem.Filesystem, error) {
 	f, err := openFile(imagePath, os.O_RDWR, 0o600)
@@ -472,6 +475,233 @@ func (fs *fat32FS) Rename(oldPath, newPath string) error {
 	// Same-parent rename: destBuf is the (possibly grown) oldBuf.
 	oldBuf = destBuf
 	return fs.writeDirBuf(oldParentCluster, oldBuf)
+}
+
+// Truncate resizes the regular file at path to newSize bytes in place.
+//
+// Shrinking frees the trailing portion of the cluster chain and zero-fills any
+// slack in the last retained cluster so that a subsequent grow reads zeros.
+// Growing allocates additional zero-filled clusters and links them onto the
+// chain. In both cases the 8.3 directory entry's FileSize (and, when the file
+// transitions to or from zero length, its first-cluster fields) is updated.
+func (fs *fat32FS) Truncate(path string, newSize int64) error {
+	if newSize < 0 {
+		return fmt.Errorf("fat32: negative truncate size %d", newSize)
+	}
+	name, parentCluster, err := fs.getParentDir(path)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		return fmt.Errorf("fat32: %q is not a regular file", path)
+	}
+	buf, err := fs.readDirBuf(parentCluster)
+	if err != nil {
+		return err
+	}
+	startOff, count, found := fat32FindEntry(buf, name)
+	if !found {
+		return fmt.Errorf("fat32: %q not found", path)
+	}
+	e8dot3 := buf[startOff+(count-1)*dirEntrySize : startOff+count*dirEntrySize]
+	if e8dot3[11]&fatAttrDirectory != 0 {
+		return fmt.Errorf("fat32: %q is a directory", path)
+	}
+
+	le := binary.LittleEndian
+	firstCluster := uint32(le.Uint16(e8dot3[20:22]))<<16 | uint32(le.Uint16(e8dot3[26:28]))
+	oldSize := int64(le.Uint32(e8dot3[28:32]))
+	if newSize == oldSize {
+		return nil
+	}
+
+	clusterSize := int64(fs.info.ClusterSize())
+	oldClusters := (oldSize + clusterSize - 1) / clusterSize
+	newClusters := (newSize + clusterSize - 1) / clusterSize
+
+	switch {
+	case newSize < oldSize:
+		if err := fs.shrinkChain(firstCluster, newClusters, newSize); err != nil {
+			return err
+		}
+		if newClusters == 0 {
+			firstCluster = 0
+		}
+	case newSize > oldSize:
+		newFirst, err := fs.growChain(firstCluster, oldClusters, newClusters, oldSize)
+		if err != nil {
+			return err
+		}
+		firstCluster = newFirst
+	}
+
+	le.PutUint16(e8dot3[20:22], uint16(firstCluster>>16))
+	le.PutUint16(e8dot3[26:28], uint16(firstCluster))
+	le.PutUint32(e8dot3[28:32], uint32(newSize))
+	return fs.writeDirBuf(parentCluster, buf)
+}
+
+// shrinkChain trims the cluster chain starting at firstCluster down to
+// keepClusters clusters, freeing the remainder, and zero-fills the slack bytes
+// (from newSize to the end of cluster) in the last retained cluster.
+func (fs *fat32FS) shrinkChain(firstCluster uint32, keepClusters, newSize int64) error {
+	if firstCluster < 2 {
+		return nil
+	}
+	if keepClusters == 0 {
+		return fs.freeChain(firstCluster)
+	}
+	clusterSize := int64(fs.info.ClusterSize())
+	fatBase := fs.info.FATOffset(fs.partOffset)
+	dataBase := fs.info.DataOffset(fs.partOffset)
+
+	// Walk to the last cluster we keep (index keepClusters-1).
+	cluster := firstCluster
+	for i := int64(0); i < keepClusters-1; i++ {
+		var next [4]byte
+		if _, err := fs.f.ReadAt(next[:], fatBase+int64(cluster)*4); err != nil {
+			return fmt.Errorf("fat32: read FAT entry for cluster %d: %w", cluster, err)
+		}
+		nextCluster := binary.LittleEndian.Uint32(next[:]) & 0x0FFFFFFF
+		if nextCluster < 2 || nextCluster >= 0x0FFFFFF7 {
+			// Chain is already shorter than the file claimed; nothing to free.
+			cluster = nextCluster
+			break
+		}
+		cluster = nextCluster
+	}
+	if cluster < 2 || cluster >= 0x0FFFFFF7 {
+		return nil
+	}
+
+	// Free everything after the last retained cluster.
+	var next [4]byte
+	if _, err := fs.f.ReadAt(next[:], fatBase+int64(cluster)*4); err != nil {
+		return fmt.Errorf("fat32: read FAT entry for cluster %d: %w", cluster, err)
+	}
+	tail := binary.LittleEndian.Uint32(next[:]) & 0x0FFFFFFF
+	if err := fs.setFATEntry(cluster, 0x0FFFFFFF); err != nil {
+		return err
+	}
+	if tail >= 2 && tail < 0x0FFFFFF7 {
+		if err := fs.freeChain(tail); err != nil {
+			return err
+		}
+	}
+
+	// Zero-fill the slack in the last retained cluster so a later grow reads
+	// zeros rather than stale data.
+	slack := newSize % clusterSize
+	if slack != 0 {
+		zeroLen := clusterSize - slack
+		zeros := make([]byte, zeroLen)
+		off := dataBase + int64(cluster-2)*clusterSize + slack
+		if _, err := fs.f.WriteAt(zeros, off); err != nil {
+			return fmt.Errorf("fat32: zero slack in cluster %d: %w", cluster, err)
+		}
+	}
+	return nil
+}
+
+// growChain extends the file from oldClusters to newClusters clusters,
+// allocating zero-filled clusters and linking them in. It zero-fills the slack
+// in the previously last cluster (from oldSize to the cluster boundary) and
+// returns the file's first cluster (a freshly allocated one when the file was
+// previously empty).
+func (fs *fat32FS) growChain(firstCluster uint32, oldClusters, newClusters, oldSize int64) (uint32, error) {
+	clusterSize := int64(fs.info.ClusterSize())
+	fatBase := fs.info.FATOffset(fs.partOffset)
+	dataBase := fs.info.DataOffset(fs.partOffset)
+
+	// Zero the slack in the existing last cluster so the grown region reads
+	// zeros across the old-size boundary.
+	if firstCluster >= 2 {
+		slack := oldSize % clusterSize
+		if slack != 0 {
+			last := firstCluster
+			for i := int64(0); i < oldClusters-1; i++ {
+				var next [4]byte
+				if _, err := fs.f.ReadAt(next[:], fatBase+int64(last)*4); err != nil {
+					return 0, fmt.Errorf("fat32: read FAT entry for cluster %d: %w", last, err)
+				}
+				nextCluster := binary.LittleEndian.Uint32(next[:]) & 0x0FFFFFFF
+				if nextCluster < 2 || nextCluster >= 0x0FFFFFF7 {
+					last = 0
+					break
+				}
+				last = nextCluster
+			}
+			if last >= 2 {
+				zeros := make([]byte, clusterSize-slack)
+				off := dataBase + int64(last-2)*clusterSize + slack
+				if _, err := fs.f.WriteAt(zeros, off); err != nil {
+					return 0, fmt.Errorf("fat32: zero slack in cluster %d: %w", last, err)
+				}
+			}
+		}
+	}
+
+	need := newClusters - oldClusters
+	if need <= 0 {
+		return firstCluster, nil
+	}
+
+	// Allocate the additional clusters, zero-fill them, and chain them together.
+	allocated := make([]uint32, 0, need)
+	rollback := func() {
+		for _, c := range allocated {
+			_ = fs.setFATEntry(c, 0)
+		}
+	}
+	zeroCluster := make([]byte, clusterSize)
+	for i := int64(0); i < need; i++ {
+		c, err := fs.allocCluster()
+		if err != nil {
+			rollback()
+			return 0, err
+		}
+		if err := fs.setFATEntry(c, 0x0FFFFFFF); err != nil {
+			rollback()
+			return 0, err
+		}
+		off := dataBase + int64(c-2)*clusterSize
+		if _, err := fs.f.WriteAt(zeroCluster, off); err != nil {
+			rollback()
+			return 0, fmt.Errorf("fat32: zero new cluster %d: %w", c, err)
+		}
+		allocated = append(allocated, c)
+	}
+	for i := 0; i < len(allocated)-1; i++ {
+		if err := fs.setFATEntry(allocated[i], allocated[i+1]); err != nil {
+			rollback()
+			return 0, err
+		}
+	}
+
+	if firstCluster < 2 {
+		// File was empty: the first allocated cluster becomes the file head.
+		return allocated[0], nil
+	}
+
+	// Link the new run onto the end of the existing chain.
+	last := firstCluster
+	for {
+		var next [4]byte
+		if _, err := fs.f.ReadAt(next[:], fatBase+int64(last)*4); err != nil {
+			rollback()
+			return 0, fmt.Errorf("fat32: read FAT entry for cluster %d: %w", last, err)
+		}
+		nextCluster := binary.LittleEndian.Uint32(next[:]) & 0x0FFFFFFF
+		if nextCluster < 2 || nextCluster >= 0x0FFFFFF7 {
+			break
+		}
+		last = nextCluster
+	}
+	if err := fs.setFATEntry(last, allocated[0]); err != nil {
+		rollback()
+		return 0, err
+	}
+	return firstCluster, nil
 }
 
 func readInfo(r io.ReaderAt, partOffset int64) (Info, error) {
