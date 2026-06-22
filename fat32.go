@@ -2,6 +2,7 @@ package filesystem_fat32
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"unicode/utf16"
 
 	filesystem "github.com/go-filesystems/interface"
+	"github.com/go-volumes/gpt"
+	"github.com/go-volumes/safeio"
 )
 
 // timeNow returns the wall-clock time stamped into newly written directory
@@ -129,7 +132,12 @@ func Open(imagePath string, partIndex int) (filesystem.Filesystem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fat32: open %s: %w", imagePath, err)
 	}
-	off, err := openPartitionOffset(f, partIndex)
+	deviceSize, err := deviceFileSize(f)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("fat32: stat %s: %w", imagePath, err)
+	}
+	off, err := openPartitionOffset(f, deviceSize, partIndex)
 	if err != nil {
 		f.Close()
 		return nil, err
@@ -685,8 +693,20 @@ func (fs *fat32FS) growChain(firstCluster uint32, oldClusters, newClusters, oldS
 	}
 
 	// Link the new run onto the end of the existing chain.
+	// C1: the walk to the chain tail is unbounded for a forged cyclic chain;
+	// guard it with a VisitSet (cycle) and a LoopGuard (over-long chain).
 	last := firstCluster
+	guard := safeio.NewLoopGuard(chainGuardLimit(fs))
+	var visited safeio.VisitSet
 	for {
+		if err := guard.Next(); err != nil {
+			rollback()
+			return 0, fmt.Errorf("fat32: grow chain from %d: %w", firstCluster, err)
+		}
+		if err := visited.Check(uint64(last)); err != nil {
+			rollback()
+			return 0, fmt.Errorf("fat32: grow chain from %d: %w", firstCluster, err)
+		}
 		var next [4]byte
 		if _, err := fs.f.ReadAt(next[:], fatBase+int64(last)*4); err != nil {
 			rollback()
@@ -781,92 +801,59 @@ func readInfo(r io.ReaderAt, partOffset int64) (Info, error) {
 	}, nil
 }
 
-func partitionOffset(r io.ReaderAt, partIndex int) (int64, error) {
-	var sig [8]byte
-	if _, err := r.ReadAt(sig[:], sectorSize); err == nil && string(sig[:]) == "EFI PART" {
-		return gptPartOffset(r, partIndex)
+// deviceFileSize returns the byte length of the backing file, used as the
+// deviceSize bound the partition-table parser validates every extent against.
+func deviceFileSize(f *os.File) (int64, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, err
 	}
-
-	var magic [2]byte
-	if _, err := r.ReadAt(magic[:], 510); err == nil && magic[0] == 0x55 && magic[1] == 0xAA {
-		return mbrPartOffset(r, partIndex)
-	}
-
-	return 0, nil
+	return fi.Size(), nil
 }
 
-func gptPartOffset(r io.ReaderAt, partIndex int) (int64, error) {
-	hdr := make([]byte, 92)
-	if _, err := r.ReadAt(hdr, sectorSize); err != nil {
-		return 0, fmt.Errorf("fat32: read GPT header: %w", err)
-	}
-	le := binary.LittleEndian
-	partEntryLBA := le.Uint64(hdr[72:])
-	numParts := le.Uint32(hdr[80:])
-	entrySize := le.Uint32(hdr[84:])
-	if entrySize < 128 {
-		return 0, fmt.Errorf("fat32: unexpected GPT entry size %d", entrySize)
-	}
-
-	tableOff := int64(partEntryLBA) * sectorSize
-	buf := make([]byte, entrySize)
-	for index := uint32(0); index < numParts; index++ {
-		if _, err := r.ReadAt(buf, tableOff+int64(index)*int64(entrySize)); err != nil {
-			break
-		}
-		var typeGUID [16]byte
-		copy(typeGUID[:], buf[:16])
-		startLBA := le.Uint64(buf[32:])
-
-		if partIndex >= 0 {
-			if int(index) != partIndex {
-				continue
-			}
-			if typeGUID == [16]byte{} || startLBA == 0 {
-				return 0, fmt.Errorf("fat32: GPT partition index %d not found", partIndex)
-			}
-			return int64(startLBA) * sectorSize, nil
-		}
-
-		if typeGUID != [16]byte{} && startLBA != 0 {
-			return int64(startLBA) * sectorSize, nil
-		}
+// partitionOffset returns the byte offset from the image start to the requested
+// partition. partIndex selects a specific partition slot (0-based); pass -1 to
+// auto-select the first populated partition. Returns 0 when no partition table
+// is present (a bare FAT32 image).
+//
+// M2: the bespoke MBR/GPT parser this used to carry validated the GPT entry
+// size only as "< 128" — a forged entrySize of 0xFFFFFFFF sailed through and
+// triggered a ~4 GB allocation plus a tableOff+index*entrySize offset overflow.
+// It is replaced by the shared, hardened go-volumes/gpt parser, which bounds
+// the entry array and every partition extent against deviceSize (computed in
+// int64 with overflow checks) so a malicious table can neither over-allocate
+// nor point us at an out-of-range offset. The historical "no table → offset 0"
+// fallback for raw mkfs.fat images is preserved via gpt.ErrNoTable.
+func partitionOffset(r io.ReaderAt, deviceSize int64, partIndex int) (int64, error) {
+	if deviceSize <= 0 {
+		// Without a usable device size we cannot validate partition extents;
+		// treat the input as a bare filesystem image rather than guessing.
+		return 0, nil
 	}
 
+	var p gpt.Partition
+	var err error
 	if partIndex >= 0 {
-		return 0, fmt.Errorf("fat32: GPT partition index %d not found", partIndex)
+		p, err = gpt.ByIndex(r, deviceSize, partIndex)
+	} else {
+		p, err = gpt.First(r, deviceSize)
 	}
-	return 0, fmt.Errorf("fat32: no populated GPT partition found")
-}
-
-func mbrPartOffset(r io.ReaderAt, partIndex int) (int64, error) {
-	table := make([]byte, 64)
-	if _, err := r.ReadAt(table, 446); err != nil {
-		return 0, fmt.Errorf("fat32: read MBR partition table: %w", err)
-	}
-	for index := 0; index < 4; index++ {
-		entry := table[index*16:]
-		startLBA := binary.LittleEndian.Uint32(entry[8:])
-
-		if partIndex >= 0 {
-			if index != partIndex {
-				continue
-			}
-			if startLBA == 0 {
-				return 0, fmt.Errorf("fat32: MBR partition index %d not found", partIndex)
-			}
-			return int64(startLBA) * sectorSize, nil
+	if err != nil {
+		// No partition table at all (no GPT header, no MBR signature) is a bare
+		// FAT32 image at offset 0. For the auto-select path a present-but-empty
+		// table (signature but no populated slot) is likewise treated as a bare
+		// image, matching the historical "first populated, else offset 0"
+		// behaviour. An explicit partIndex that is empty/out-of-range stays an
+		// error so callers learn the slot they asked for is unusable.
+		if errors.Is(err, gpt.ErrNoTable) {
+			return 0, nil
 		}
-
-		if startLBA != 0 {
-			return int64(startLBA) * sectorSize, nil
+		if partIndex < 0 && errors.Is(err, gpt.ErrNotFound) {
+			return 0, nil
 		}
+		return 0, fmt.Errorf("fat32: partition table: %w", err)
 	}
-
-	if partIndex >= 0 {
-		return 0, fmt.Errorf("fat32: MBR partition index %d not found", partIndex)
-	}
-	return 0, nil
+	return p.StartOffset, nil
 }
 
 // maxDirClusters caps how many clusters a single directory may occupy.
@@ -889,7 +876,19 @@ func (fs *fat32FS) writeDirBuf(startCluster uint32, buf []byte) error {
 	dataBase := fs.info.DataOffset(fs.partOffset)
 	fatBase := fs.info.FATOffset(fs.partOffset)
 	cluster := startCluster
+	// C1: bound the chain walk. A freshly allocated extension cluster (below)
+	// is also a "visit", so the budget is cluster count plus the dir cap worth
+	// of fresh links; a forged cyclic chain that re-enters an existing cluster
+	// is rejected by the VisitSet before it can loop.
+	guard := safeio.NewLoopGuard(chainGuardLimit(fs) + maxDirClusters)
+	var visited safeio.VisitSet
 	for pos := 0; pos < len(buf); pos += int(clusterSize) {
+		if err := guard.Next(); err != nil {
+			return fmt.Errorf("fat32: write directory chain from %d: %w", startCluster, err)
+		}
+		if err := visited.Check(uint64(cluster)); err != nil {
+			return fmt.Errorf("fat32: write directory chain from %d: %w", startCluster, err)
+		}
 		off := dataBase + int64(cluster-2)*clusterSize
 		end := pos + int(clusterSize)
 		if end > len(buf) {
@@ -1455,7 +1454,37 @@ func trimASCII(raw []byte) string {
 	return strings.TrimRight(string(raw), " \x00")
 }
 
-// readClusterChain follows the FAT chain starting at start and returns up to size bytes.
+// clusterCount returns the number of data clusters the volume can hold, used to
+// bound every FAT-chain walk and chain-derived allocation. It is computed from
+// the BPB geometry (already validated by readInfo: SectorsPerCluster is a
+// non-zero power of two), so the division cannot trap.
+func (fs *fat32FS) clusterCount() int64 {
+	return int64(fs.info.TotalSectors) / int64(fs.info.SectorsPerCluster)
+}
+
+// chainGuardLimit is the iteration ceiling applied to every FAT-chain walk via
+// safeio.NewLoopGuard. A legitimate chain visits at most clusterCount distinct
+// clusters, so clusterCount+1 never trips on valid data while still bounding a
+// forged chain that walks cluster numbers beyond the volume's real geometry
+// (which the VisitSet alone would not catch, since those clusters are all
+// distinct). It is a package-level var so tests can shrink it to exercise the
+// guard's error branch without building a volume with millions of clusters.
+var chainGuardLimit = func(fs *fat32FS) int {
+	return int(fs.clusterCount()) + 1
+}
+
+// readClusterChain follows the FAT chain starting at start and returns up to
+// size bytes.
+//
+// C1/M3: a malicious image can forge a cyclic FAT chain (cluster N → N) or a
+// FileSize of 0xFFFFFFFF. The original code would then append forever (hang)
+// and/or pre-size buf to ~4 GB (OOM). The walk is now bounded two ways: a
+// safeio.VisitSet rejects any revisited cluster (cycle → ErrCycle) and a
+// safeio.LoopGuard sized to the cluster count caps the iteration count even for
+// a non-cyclic but over-long chain. The result buffer is grown incrementally
+// (no pre-allocation from the attacker-controlled size) and clamped to the
+// real on-disk capacity via safeio.MakeBytes, so size only ever trims a buffer
+// we already legitimately read.
 func (fs *fat32FS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 	if start == 0 {
 		return []byte{}, nil
@@ -1463,11 +1492,33 @@ func (fs *fat32FS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 	clusterSize := int64(fs.info.ClusterSize())
 	fatBase := fs.info.FATOffset(fs.partOffset)
 	dataBase := fs.info.DataOffset(fs.partOffset)
-	buf := make([]byte, 0, size)
+
+	// Cap the requested size at the volume's real data capacity so a forged
+	// FileSize cannot drive an over-large allocation. clusterCount and
+	// clusterSize are both bounded positive (BPB geometry was validated by
+	// readInfo), so the product stays a sane positive int64. The chain itself
+	// is bounded below, so buf never exceeds maxBytes regardless.
+	maxBytes := fs.clusterCount() * clusterSize
+	if size > uint64(maxBytes) {
+		size = uint64(maxBytes)
+	}
+
+	var buf []byte
+	guard := safeio.NewLoopGuard(chainGuardLimit(fs))
+	var visited safeio.VisitSet
 	cluster := start
 	for {
 		if cluster < 2 || cluster >= 0x0FFFFFF7 {
 			break
+		}
+		if uint64(len(buf)) >= size {
+			break
+		}
+		if err := guard.Next(); err != nil {
+			return nil, fmt.Errorf("fat32: cluster chain from %d: %w", start, err)
+		}
+		if err := visited.Check(uint64(cluster)); err != nil {
+			return nil, fmt.Errorf("fat32: cluster chain from %d: %w", start, err)
 		}
 		clusterBuf := make([]byte, clusterSize)
 		off := dataBase + int64(cluster-2)*clusterSize
@@ -1574,10 +1625,22 @@ func (fs *fat32FS) setFATEntry(cluster uint32, value uint32) error {
 }
 
 // freeChain marks every cluster in the FAT chain starting at start as free.
+//
+// C1: bounded by a safeio.VisitSet (cycle) and LoopGuard (over-long chain) so a
+// forged cyclic chain frees each cluster at most once and terminates instead of
+// spinning forever.
 func (fs *fat32FS) freeChain(start uint32) error {
 	fatBase := fs.info.FATOffset(fs.partOffset)
+	guard := safeio.NewLoopGuard(chainGuardLimit(fs))
+	var visited safeio.VisitSet
 	cluster := start
 	for cluster >= 2 && cluster < 0x0FFFFFF7 {
+		if err := guard.Next(); err != nil {
+			return fmt.Errorf("fat32: free chain from %d: %w", start, err)
+		}
+		if err := visited.Check(uint64(cluster)); err != nil {
+			return fmt.Errorf("fat32: free chain from %d: %w", start, err)
+		}
 		var next [4]byte
 		if _, err := fs.f.ReadAt(next[:], fatBase+int64(cluster)*4); err != nil {
 			return fmt.Errorf("fat32: read FAT entry for cluster %d: %w", cluster, err)

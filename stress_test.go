@@ -66,12 +66,12 @@ var (
 // merging flag defaults with env-var overrides. short reports whether the
 // caller is in `go test -short` mode (heavy tests will skip).
 type stressKnobs struct {
-	duration  time.Duration
-	workers   int
-	fileMB    int
-	files     int
-	faultPct  int
-	short     bool
+	duration time.Duration
+	workers  int
+	fileMB   int
+	files    int
+	faultPct int
+	short    bool
 }
 
 func loadStressKnobs(t testing.TB) stressKnobs {
@@ -321,8 +321,8 @@ func TestStressLargeFile(t *testing.T) {
 // actually allocating a 4 GiB image (which is impractical for CI). The
 // goal is to verify that:
 //
-//   (a) size = 4 GiB - 1 round-trips correctly through Stat()
-//   (b) the writer rejects (or correctly handles) size > 4 GiB - 1
+//	(a) size = 4 GiB - 1 round-trips correctly through Stat()
+//	(b) the writer rejects (or correctly handles) size > 4 GiB - 1
 //
 // We do (a) by directly poking a synthetic dir entry — the on-disk
 // metadata path is what would break first.
@@ -683,7 +683,11 @@ func TestStressFaultInjection(t *testing.T) {
 	}
 
 	// Build a fat32FS directly around the faulty disk.
-	off, err := partitionOffset(inner, -1)
+	innerInfo, err := inner.Stat()
+	if err != nil {
+		t.Fatalf("stat image: %v", err)
+	}
+	off, err := partitionOffset(inner, innerInfo.Size(), -1)
 	if err != nil {
 		t.Fatalf("partitionOffset: %v", err)
 	}
@@ -785,4 +789,3 @@ func TestStressLFNEdgeCases(t *testing.T) {
 		})
 	}
 }
-

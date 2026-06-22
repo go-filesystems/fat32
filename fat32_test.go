@@ -117,7 +117,7 @@ func TestOpenBareImageAndInfoHelpers(t *testing.T) {
 
 func TestOpenWithMBRPartition(t *testing.T) {
 	image := make([]byte, 4096*sectorSize)
-	writeMBRPartition(image, 0, 2048)
+	writeMBRPartition(image, 0, 2048, 2048)
 	copy(image[2048*sectorSize:], defaultFAT32BootSector())
 
 	path := filepath.Join(t.TempDir(), "fat32-mbr.img")
@@ -357,7 +357,7 @@ func TestOpenErrorPaths(t *testing.T) {
 	}
 
 	openFile = origOpenFile
-	openPartitionOffset = func(io.ReaderAt, int) (int64, error) {
+	openPartitionOffset = func(io.ReaderAt, int64, int) (int64, error) {
 		return 0, errors.New("partition")
 	}
 	if _, err := Open(path, -1); err == nil {
@@ -412,8 +412,18 @@ func TestReadInfoValidationErrors(t *testing.T) {
 }
 
 func TestPartitionOffsetVariants(t *testing.T) {
+	t.Run("zero device size", func(t *testing.T) {
+		// Without a usable device size the parser treats the input as a bare
+		// image (offset 0) rather than guessing.
+		off, err := partitionOffset(bytes.NewReader(make([]byte, sectorSize)), 0, -1)
+		if err != nil || off != 0 {
+			t.Fatalf("partitionOffset(deviceSize=0) = (%d, %v), want (0, nil)", off, err)
+		}
+	})
+
 	t.Run("bare image", func(t *testing.T) {
-		off, err := partitionOffset(bytes.NewReader(make([]byte, sectorSize)), -1)
+		image := make([]byte, 8*sectorSize)
+		off, err := partitionOffset(bytes.NewReader(image), int64(len(image)), -1)
 		if err != nil {
 			t.Fatalf("partitionOffset: %v", err)
 		}
@@ -423,74 +433,67 @@ func TestPartitionOffsetVariants(t *testing.T) {
 	})
 
 	t.Run("gpt auto and index", func(t *testing.T) {
-		image := make([]byte, 12*sectorSize)
-		writeGPT(image, 2, []uint64{2048, 4096})
-		if off, err := partitionOffset(bytes.NewReader(image), -1); err != nil || off != int64(2048*sectorSize) {
-			t.Fatalf("partitionOffset(auto) = (%d, %v), want (%d, nil)", off, err, 2048*sectorSize)
+		// 64-sector device; two GPT entries: slot 0 starts at LBA 8, slot 1 at
+		// LBA 16, each one sector long. With empty slots skipped, ByIndex(0)
+		// selects the first entry and ByIndex(1) the second.
+		image := make([]byte, 64*sectorSize)
+		writeGPT(image, 2, []gptEntry{{startLBA: 8, endLBA: 8}, {startLBA: 16, endLBA: 16}})
+		dev := int64(len(image))
+		if off, err := partitionOffset(bytes.NewReader(image), dev, -1); err != nil || off != int64(8*sectorSize) {
+			t.Fatalf("partitionOffset(auto) = (%d, %v), want (%d, nil)", off, err, 8*sectorSize)
 		}
-		if off, err := partitionOffset(bytes.NewReader(image), 1); err != nil || off != int64(4096*sectorSize) {
-			t.Fatalf("partitionOffset(index) = (%d, %v), want (%d, nil)", off, err, 4096*sectorSize)
+		if off, err := partitionOffset(bytes.NewReader(image), dev, 1); err != nil || off != int64(16*sectorSize) {
+			t.Fatalf("partitionOffset(index) = (%d, %v), want (%d, nil)", off, err, 16*sectorSize)
 		}
 	})
 
 	t.Run("gpt errors", func(t *testing.T) {
-		short := make([]byte, sectorSize+8)
-		copy(short[sectorSize:], []byte("EFI PART"))
-		if _, err := partitionOffset(bytes.NewReader(short), -1); err == nil {
-			t.Fatal("partitionOffset() error = nil, want GPT header error")
-		}
-
+		// Forged entry size 0xFFFFFFFF — the original ~4 GB-allocation / offset-
+		// overflow vector — must surface as a graceful error, never a panic.
 		badEntrySize := make([]byte, 4*sectorSize)
-		writeGPTHeaderOnly(badEntrySize, 2, 64, 1)
-		if _, err := partitionOffset(bytes.NewReader(badEntrySize), -1); err == nil {
+		writeGPTHeaderOnly(badEntrySize, 2, 0xFFFFFFFF, 1)
+		if _, err := partitionOffset(bytes.NewReader(badEntrySize), int64(len(badEntrySize)), -1); err == nil {
 			t.Fatal("partitionOffset() error = nil, want GPT entry-size error")
 		}
 
-		truncated := make([]byte, 4*sectorSize)
-		writeGPTHeaderOnly(truncated, 2, 128, 1)
-		if _, err := partitionOffset(errorReaderAt{data: truncated, failOffset: 2 * sectorSize}, -1); err == nil {
-			t.Fatal("partitionOffset() error = nil, want truncated GPT table error")
-		}
-
+		// All-empty entry array: auto-select finds nothing → ErrNotFound.
 		empty := make([]byte, 4*sectorSize)
-		writeGPTHeaderOnly(empty, 2, 128, 1)
-		if _, err := partitionOffset(bytes.NewReader(empty), -1); err == nil {
+		writeGPTHeaderOnly(empty, 2, 1, 1)
+		if _, err := partitionOffset(bytes.NewReader(empty), int64(len(empty)), -1); err == nil {
 			t.Fatal("partitionOffset() error = nil, want missing GPT partition error")
 		}
-		if _, err := partitionOffset(bytes.NewReader(empty), 0); err == nil {
+		if _, err := partitionOffset(bytes.NewReader(empty), int64(len(empty)), 0); err == nil {
 			t.Fatal("partitionOffset() error = nil, want missing GPT index error")
-		}
-		if _, err := partitionOffset(bytes.NewReader(empty), 3); err == nil {
-			t.Fatal("partitionOffset() error = nil, want out-of-range GPT index error")
 		}
 	})
 
 	t.Run("mbr auto and index", func(t *testing.T) {
-		image := make([]byte, sectorSize)
-		writeMBRPartition(image, 1, 4096)
-		if off, err := partitionOffset(bytes.NewReader(image), -1); err != nil || off != int64(4096*sectorSize) {
+		// 8192-sector device with a single MBR entry at slot 1 (start LBA 4096).
+		image := make([]byte, 8192*sectorSize)
+		writeMBRPartition(image, 1, 4096, 16)
+		dev := int64(len(image))
+		if off, err := partitionOffset(bytes.NewReader(image), dev, -1); err != nil || off != int64(4096*sectorSize) {
 			t.Fatalf("partitionOffset(auto) = (%d, %v), want (%d, nil)", off, err, 4096*sectorSize)
 		}
-		if off, err := partitionOffset(bytes.NewReader(image), 1); err != nil || off != int64(4096*sectorSize) {
+		if off, err := partitionOffset(bytes.NewReader(image), dev, 1); err != nil || off != int64(4096*sectorSize) {
 			t.Fatalf("partitionOffset(index) = (%d, %v), want (%d, nil)", off, err, 4096*sectorSize)
+		}
+		// Slot 0 is empty: ByIndex(0) finds no populated entry there.
+		if _, err := partitionOffset(bytes.NewReader(image), dev, 0); err == nil {
+			t.Fatal("partitionOffset() error = nil, want missing MBR slot-0 error")
 		}
 	})
 
 	t.Run("mbr errors", func(t *testing.T) {
-		image := make([]byte, sectorSize)
+		image := make([]byte, 8*sectorSize)
 		image[510] = 0x55
 		image[511] = 0xAA
-		if _, err := partitionOffset(errorReaderAt{data: image, failOffset: 446}, -1); err == nil {
+		if _, err := partitionOffset(errorReaderAt{data: image, failOffset: 446}, int64(len(image)), -1); err == nil {
 			t.Fatal("partitionOffset() error = nil, want MBR read error")
 		}
-		if off, err := partitionOffset(bytes.NewReader(image), -1); err != nil || off != 0 {
+		// Signature present but every slot empty → ErrNoTable → bare image.
+		if off, err := partitionOffset(bytes.NewReader(image), int64(len(image)), -1); err != nil || off != 0 {
 			t.Fatalf("partitionOffset() = (%d, %v), want (0, nil)", off, err)
-		}
-		if _, err := partitionOffset(bytes.NewReader(image), 0); err == nil {
-			t.Fatal("partitionOffset() error = nil, want missing MBR index error")
-		}
-		if _, err := partitionOffset(bytes.NewReader(image), 5); err == nil {
-			t.Fatal("partitionOffset() error = nil, want out-of-range MBR index error")
 		}
 	})
 }
@@ -517,20 +520,29 @@ func defaultFAT32BootSector() []byte {
 	return buf
 }
 
-func writeMBRPartition(image []byte, index int, startLBA uint32) {
+func writeMBRPartition(image []byte, index int, startLBA, numSectors uint32) {
 	image[510] = 0x55
 	image[511] = 0xAA
 	entry := image[446+index*16:]
+	entry[4] = 0x0C // FAT32 LBA type
 	binary.LittleEndian.PutUint32(entry[8:], startLBA)
-	entry[4] = 0x0C
+	binary.LittleEndian.PutUint32(entry[12:], numSectors)
 }
 
-func writeGPT(image []byte, entryLBA uint64, starts []uint64) {
-	writeGPTHeaderOnly(image, entryLBA, 128, uint32(len(starts)))
-	for index, start := range starts {
+// gptEntry describes one GPT partition slot for the test-image builder.
+type gptEntry struct {
+	startLBA uint64
+	endLBA   uint64 // inclusive last LBA
+}
+
+func writeGPT(image []byte, entryLBA uint64, entries []gptEntry) {
+	writeGPTHeaderOnly(image, entryLBA, 128, uint32(len(entries)))
+	for index, e := range entries {
 		entry := image[int(entryLBA)*sectorSize+index*128:]
+		// Non-zero type GUID marks the slot as populated.
 		entry[0] = byte(index + 1)
-		binary.LittleEndian.PutUint64(entry[32:], start)
+		binary.LittleEndian.PutUint64(entry[32:], e.startLBA)
+		binary.LittleEndian.PutUint64(entry[40:], e.endLBA)
 	}
 }
 

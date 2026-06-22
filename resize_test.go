@@ -19,9 +19,9 @@ import (
 // FAT slack — plenty to grow into. We exercise both directions with concrete
 // power-of-two multiples of the cluster size.
 const (
-	resizeMinSize     = int64(4 * 1024 * 1024)   // 4 MiB — same as fat32TestSize
-	resizeBaseSize    = int64(16 * 1024 * 1024)  // 16 MiB starting volume
-	resizeBigSize     = int64(32 * 1024 * 1024)  // 32 MiB grown volume
+	resizeMinSize     = int64(4 * 1024 * 1024)  // 4 MiB — same as fat32TestSize
+	resizeBaseSize    = int64(16 * 1024 * 1024) // 16 MiB starting volume
+	resizeBigSize     = int64(32 * 1024 * 1024) // 32 MiB grown volume
 	resizeClusterByte = fmtBytesPerSector * fmtSectorsPerCluster
 )
 
@@ -362,7 +362,7 @@ func TestResize_RefusesPartitionedImage(t *testing.T) {
 	// Assemble: 2048 sectors of MBR + partition + fsBytes.
 	const startLBA = 2048
 	disk := make([]byte, int64(startLBA)*sectorSize+resizeBaseSize)
-	writeMBRPartition(disk, 0, startLBA)
+	writeMBRPartition(disk, 0, startLBA, uint32(resizeBaseSize/sectorSize))
 	copy(disk[startLBA*sectorSize:], fsBytes)
 	if err := os.WriteFile(imgPath, disk, 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -458,8 +458,8 @@ func (d *truncFailDisk) ReadAt(p []byte, off int64) (int, error) {
 func (d *truncFailDisk) WriteAt(p []byte, off int64) (int, error) {
 	return d.inner.WriteAt(p, off)
 }
-func (d *truncFailDisk) Close() error          { return d.inner.Close() }
-func (d *truncFailDisk) Truncate(int64) error  { return errors.New("truncate boom") }
+func (d *truncFailDisk) Close() error         { return d.inner.Close() }
+func (d *truncFailDisk) Truncate(int64) error { return errors.New("truncate boom") }
 func (d *truncFailDisk) Stat() (os.FileInfo, error) {
 	return d.inner.Stat()
 }
@@ -659,9 +659,9 @@ func (d *resizeFaultDisk) WriteAt(p []byte, off int64) (int, error) {
 	}
 	return d.inner.WriteAt(p, off)
 }
-func (d *resizeFaultDisk) Close() error                  { return d.inner.Close() }
-func (d *resizeFaultDisk) Truncate(n int64) error        { return d.inner.Truncate(n) }
-func (d *resizeFaultDisk) Stat() (os.FileInfo, error)    { return d.inner.Stat() }
+func (d *resizeFaultDisk) Close() error               { return d.inner.Close() }
+func (d *resizeFaultDisk) Truncate(n int64) error     { return d.inner.Truncate(n) }
+func (d *resizeFaultDisk) Stat() (os.FileInfo, error) { return d.inner.Stat() }
 
 // openFaultFS formats a fresh image and reopens it through a resizeFaultDisk
 // so the test can inject failures at a chosen offset.
