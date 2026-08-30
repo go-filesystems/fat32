@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"sync/atomic"
 
 	filesystem "github.com/go-filesystems/interface"
@@ -29,11 +30,22 @@ var _ filesystem.Opener = (*fat32FS)(nil)
 // safeio guards against forged images (cycles, over-long chains), and reads go
 // through the same *fat32FS block layer. Nothing here bypasses either.
 //
-// Every field is written once during OpenFile and only read afterwards, so
-// concurrent ReadAt calls need no synchronisation of their own — as
-// io.ReaderAt requires. The one mutable field, closed, is atomic.
+// The chain and the size are settled at OpenFile and change only when a write
+// through this File extends or truncates it (see writeat.go), so mu — an
+// RWMutex — is held for reading by ReadAt and for writing by WriteAt,
+// Truncate and Sync. Concurrent ReadAt calls therefore proceed in parallel, as
+// io.ReaderAt requires; concurrent writes are serialised, which is stricter
+// than io.WriterAt demands and never wrong. The one lock-free field, closed,
+// is atomic so a use-after-close is reported rather than raced on.
 type fat32File struct {
 	fs *fat32FS
+	// path is the file's path in the volume. It is kept because extending or
+	// truncating the file has to rewrite the directory entry — FAT stores a
+	// file's length there and nowhere else — and there is no back-pointer
+	// from a cluster to the entry that owns it.
+	path string
+	// mu guards clusters and size against a concurrent extend or truncate.
+	mu sync.RWMutex
 	// clusters holds the file's chain in order: clusters[i] is the cluster
 	// number holding bytes [i*clusterSize, (i+1)*clusterSize).
 	clusters []uint32
@@ -72,6 +84,7 @@ func (fs *fat32FS) OpenFile(path string) (filesystem.File, error) {
 	}
 	return &fat32File{
 		fs:          fs,
+		path:        path,
 		clusters:    clusters,
 		size:        size,
 		clusterSize: int64(fs.info.ClusterSize()),
@@ -137,9 +150,14 @@ func (fs *fat32FS) chainClusters(start uint32, size uint64) ([]uint32, int64, er
 	return clusters, covered, nil
 }
 
-// Size returns the file's readable length in bytes, taken from the directory
-// entry read at OpenFile time and clamped to what the chain addresses. No I/O.
-func (f *fat32File) Size() int64 { return f.size }
+// Size returns the file's readable length in bytes: the directory entry's
+// FileSize read at OpenFile, clamped to what the chain addresses, and then
+// tracking every extend or truncate performed through this File. No I/O.
+func (f *fat32File) Size() int64 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.size
+}
 
 // Close releases the File. FAT32 files hold no per-file handle — the volume's
 // single descriptor stays owned by the Filesystem — so Close only marks the
@@ -171,6 +189,10 @@ func (f *fat32File) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("fat32: ReadAt: negative offset %d", off)
 	}
+	// The read lock keeps a read from observing a half-applied extend; it is
+	// shared, so parallel ReadAt calls are not serialised against each other.
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	if off >= f.size {
 		return 0, io.EOF
 	}
