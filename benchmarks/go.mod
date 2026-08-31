@@ -6,8 +6,8 @@ module github.com/go-filesystems/fat32/benchmarks
 go 1.26.4
 
 require (
-	github.com/go-filesystems/fat32 v0.0.0
-	github.com/go-filesystems/interface v0.0.0-20260622072638-0b01d4fb163f
+	github.com/go-filesystems/fat32 v0.3.0
+	github.com/go-filesystems/interface v0.3.0
 )
 
 require (
