@@ -47,6 +47,12 @@ jobs:
           cache: true
           cache-dependency-path: fat32/go.mod
 
+      # mtools is the foreign reader: mdir lists an image WE wrote, so the
+      # listing is another implementation's opinion rather than our own.
+      # It reads an image FILE and needs no privilege.
+      - name: mtools, as a foreign reader of what we write
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mtools
+
       - name: Vet
         working-directory: fat32
         run: go vet -mod=mod ./...
@@ -57,6 +63,9 @@ jobs:
 
       - name: Test (race + coverage)
         working-directory: fat32
+        env:
+          # A skip here would look exactly like a pass.
+          FAT32_REQUIRE_MTOOLS: "1"
         run: go test -mod=mod -race -coverprofile=cover.out -covermode=atomic ./...
 
       - name: Enforce coverage gate

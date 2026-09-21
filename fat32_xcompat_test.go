@@ -295,6 +295,12 @@ func TestWriteThenFsckVfatMultiClusterRoot(t *testing.T) {
 func TestWriteThenMtoolsMdir(t *testing.T) {
 	mdir, err := exec.LookPath("mdir")
 	if err != nil {
+		// A skipped judge reads exactly like a passing one. The lane that
+		// installs mtools sets this, so its absence there is a broken lane
+		// rather than a reason to go quietly green.
+		if os.Getenv("FAT32_REQUIRE_MTOOLS") != "" {
+			t.Fatalf("FAT32_REQUIRE_MTOOLS is set but mtools is not installed: %v", err)
+		}
 		t.Skip("mtools `mdir` not found in PATH (install mtools)")
 	}
 
