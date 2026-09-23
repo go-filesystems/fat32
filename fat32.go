@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"os"
 	"strings"
 	"time"
@@ -333,7 +334,7 @@ func (fs *fat32FS) DeleteFile(path string) error {
 	}
 	startOff, count, found := fat32FindEntry(buf, name)
 	if !found {
-		return fmt.Errorf("fat32: %q not found", path)
+		return fmt.Errorf("fat32: %q not found: %w", path, iofs.ErrNotExist)
 	}
 	e8dot3 := buf[startOff+(count-1)*dirEntrySize : startOff+count*dirEntrySize]
 	if e8dot3[11]&fatAttrDirectory != 0 {
@@ -367,7 +368,7 @@ func (fs *fat32FS) DeleteDir(path string) error {
 	}
 	startOff, count, found := fat32FindEntry(buf, name)
 	if !found {
-		return fmt.Errorf("fat32: %q not found", path)
+		return fmt.Errorf("fat32: %q not found: %w", path, iofs.ErrNotExist)
 	}
 	e8dot3 := buf[startOff+(count-1)*dirEntrySize : startOff+count*dirEntrySize]
 	if e8dot3[11]&fatAttrDirectory == 0 {
@@ -415,7 +416,7 @@ func (fs *fat32FS) Rename(oldPath, newPath string) error {
 	}
 	oldStart, oldCount, oldFound := fat32FindEntry(oldBuf, oldName)
 	if !oldFound {
-		return fmt.Errorf("fat32: %q not found", oldPath)
+		return fmt.Errorf("fat32: %q not found: %w", oldPath, iofs.ErrNotExist)
 	}
 	old8dot3 := oldBuf[oldStart+(oldCount-1)*dirEntrySize : oldStart+oldCount*dirEntrySize]
 	oldCluster := uint32(binary.LittleEndian.Uint16(old8dot3[20:22]))<<16 |
@@ -510,7 +511,7 @@ func (fs *fat32FS) Truncate(path string, newSize int64) error {
 	}
 	startOff, count, found := fat32FindEntry(buf, name)
 	if !found {
-		return fmt.Errorf("fat32: %q not found", path)
+		return fmt.Errorf("fat32: %q not found: %w", path, iofs.ErrNotExist)
 	}
 	e8dot3 := buf[startOff+(count-1)*dirEntrySize : startOff+count*dirEntrySize]
 	if e8dot3[11]&fatAttrDirectory != 0 {
@@ -1269,7 +1270,7 @@ func (fs *fat32FS) resolvePath(path string) (rootDirEntry, uint32, error) {
 		}
 		startOff, count, found := fat32FindEntry(buf, name)
 		if !found {
-			return rootDirEntry{}, 0, fmt.Errorf("fat32: %q not found", path)
+			return rootDirEntry{}, 0, fmt.Errorf("fat32: %q not found: %w", path, iofs.ErrNotExist)
 		}
 		off8dot3 := startOff + (count-1)*dirEntrySize
 		entry = toRootDirEntry(buf[off8dot3 : off8dot3+dirEntrySize])
@@ -1302,7 +1303,7 @@ func (fs *fat32FS) getParentDir(path string) (name string, parentCluster uint32,
 		}
 		startOff, count, found := fat32FindEntry(buf, components[i])
 		if !found {
-			return "", 0, fmt.Errorf("fat32: parent directory %q not found", components[i])
+			return "", 0, fmt.Errorf("fat32: parent directory %q not found: %w", components[i], iofs.ErrNotExist)
 		}
 		off8dot3 := startOff + (count-1)*dirEntrySize
 		e := toRootDirEntry(buf[off8dot3 : off8dot3+dirEntrySize])

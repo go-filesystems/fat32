@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -614,4 +615,45 @@ func fatTestImage(t *testing.T, setupRoot func(root []byte), fatEntries map[uint
 		t.Fatalf("os.WriteFile: %v", err)
 	}
 	return path
+}
+
+// ⛔ The error contract from go-filesystems/interface: a path that is not
+// there must satisfy errors.Is(err, fs.ErrNotExist).
+//
+// It is not a tidiness rule. Every server in this family classifies with
+// errors.Is and nothing else -- webdav's statusFor, and the same shape in nfs
+// and sftp -- so before this, a missing file over WebDAV answered 500 rather
+// than 404. To an HTTP or S3 client that decides whether to RETRY, so the
+// wrong error turned one missing file into a storm of requests.
+func TestMissingPathsSatisfyErrNotExist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fs.img")
+	fsys, err := Format(path, 16<<20, FormatConfig{Label: "ERRTEST"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsys.Close()
+	if err := fsys.MkDir("/dir", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		what string
+		err  error
+	}{
+		{"Stat", func() error { _, e := fsys.Stat("/nope.txt"); return e }()},
+		{"ReadFile", func() error { _, e := fsys.ReadFile("/nope.txt"); return e }()},
+		{"ListDir", func() error { _, e := fsys.ListDir("/nope"); return e }()},
+		{"DeleteFile", fsys.DeleteFile("/nope.txt")},
+		{"DeleteDir", fsys.DeleteDir("/nope")},
+		{"Rename", fsys.Rename("/nope.txt", "/other.txt")},
+		{"WriteFile into a missing directory", fsys.WriteFile("/nope/x.txt", []byte("x"), 0o644)},
+	} {
+		if tc.err == nil {
+			t.Errorf("%s on a missing path returned no error at all", tc.what)
+			continue
+		}
+		if !errors.Is(tc.err, iofs.ErrNotExist) {
+			t.Errorf("%s: errors.Is(err, fs.ErrNotExist) is false for %q", tc.what, tc.err)
+		}
+	}
 }
