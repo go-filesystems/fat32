@@ -620,11 +620,17 @@ func fatTestImage(t *testing.T, setupRoot func(root []byte), fatEntries map[uint
 // ⛔ The error contract from go-filesystems/interface: a path that is not
 // there must satisfy errors.Is(err, fs.ErrNotExist).
 //
-// It is not a tidiness rule. Every server in this family classifies with
-// errors.Is and nothing else -- webdav's statusFor, and the same shape in nfs
-// and sftp -- so before this, a missing file over WebDAV answered 500 rather
-// than 404. To an HTTP or S3 client that decides whether to RETRY, so the
-// wrong error turned one missing file into a storm of requests.
+// ⚠ The commit that added this test said a missing file over WebDAV answered
+// 500 before the change. THAT WAS WRONG, and measuring it afterwards is what
+// showed it: 404 either way. webdav tries errors.Is first and then falls back
+// to a table of twelve message fragments, and "not found" is one of them -- so
+// it caught this driver by its phrasing all along.
+//
+// The wrapping is still right, for the reason webdav's own comment on that
+// table gives: it is "a *last* resort", the same twelve entries are duplicated
+// in go-filesystems/nfs, and correctness otherwise depends on how each driver
+// PHRASES its errors. A driver saying "cannot locate" would get the fallback
+// status silently, with no test failing anywhere.
 func TestMissingPathsSatisfyErrNotExist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fs.img")
 	fsys, err := Format(path, 16<<20, FormatConfig{Label: "ERRTEST"})
