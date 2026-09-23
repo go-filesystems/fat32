@@ -3,6 +3,7 @@ package filesystem_fat32
 import (
 	"encoding/binary"
 	"fmt"
+	iofs "io/fs"
 	"os"
 
 	filesystem "github.com/go-filesystems/interface"
@@ -371,7 +372,7 @@ func (fs *fat32FS) setDirEntryExtent(path string, firstCluster uint32, size int6
 	}
 	startOff, count, found := fat32FindEntry(buf, name)
 	if !found {
-		return fmt.Errorf("fat32: %q not found", path)
+		return fmt.Errorf("fat32: %q not found: %w", path, iofs.ErrNotExist)
 	}
 	e := buf[startOff+(count-1)*dirEntrySize : startOff+count*dirEntrySize]
 	le := binary.LittleEndian
