@@ -3,11 +3,11 @@
 // affects the coverage floor. See BENCHMARKS.md.
 module github.com/go-filesystems/fat32/benchmarks
 
-go 1.26.4
+go 1.27.1
 
 require (
-	github.com/go-filesystems/fat32 v0.4.0
-	github.com/go-filesystems/interface v0.3.0
+	github.com/go-filesystems/fat32 v0.5.0
+	github.com/go-filesystems/interface v0.4.0
 )
 
 require (
