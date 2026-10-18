@@ -12,7 +12,7 @@ require (
 
 require (
 	github.com/go-volumes/gpt v0.3.0 // indirect
-	github.com/go-volumes/safeio v0.0.0-20261005011856-0ebc4afd6b14 // indirect
+	github.com/go-volumes/safeio v0.0.0-20261011024942-5635ea21db3b // indirect
 )
 
 replace github.com/go-filesystems/fat32 => ..
