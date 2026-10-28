@@ -2,7 +2,9 @@ package filesystem_fat32
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 
@@ -27,6 +29,7 @@ const (
 	fmtFSInfoSector      = 1
 	fmtBackupBootSector  = 6
 	fmtRootCluster       = 2
+	fmtClusterSize       = fmtBytesPerSector * fmtSectorsPerCluster
 )
 
 type formatFile interface {
@@ -56,21 +59,26 @@ func hasNonSpace(s string) bool {
 	return false
 }
 
-// Format creates a new FAT32 filesystem in the file at path.
-// The file is created (or truncated) and formatted. sizeBytes must be a
-// multiple of the cluster size (4096) and large enough to hold the reserved
-// area, two FATs, and at least one data cluster.
-//
-// On success the newly formatted filesystem is opened and returned; the
-// caller must Close it when done.
-func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesystem, error) {
-	const clusterSize = fmtBytesPerSector * fmtSectorsPerCluster
-	if sizeBytes%clusterSize != 0 {
-		return nil, fmt.Errorf("fat32: format: size %d is not a multiple of cluster size %d",
-			sizeBytes, clusterSize)
+// fmtLayout is what a format computes from the size before writing anything.
+type fmtLayout struct {
+	totalSectors   int64
+	fatSizeSectors int64
+}
+
+// formatLayout validates sizeBytes and sizes the FATs. It writes nothing, so
+// an invalid size is refused before a file is created or a byte is written.
+func formatLayout(sizeBytes int64) (fmtLayout, error) {
+	if sizeBytes%fmtClusterSize != 0 {
+		return fmtLayout{}, fmt.Errorf("fat32: format: size %d is not a multiple of cluster size %d",
+			sizeBytes, fmtClusterSize)
+	}
+	totalSectors := sizeBytes / fmtBytesPerSector
+	// The BPB's total-sector field is 32 bits wide: a larger size would be
+	// written truncated and describe a different, smaller volume.
+	if totalSectors > 0xFFFFFFFF {
+		return fmtLayout{}, fmt.Errorf("fat32: format: size %d is larger than FAT32 can describe", sizeBytes)
 	}
 
-	totalSectors := sizeBytes / fmtBytesPerSector
 	// FAT size in sectors: enough entries for every cluster (4 bytes each).
 	// Clusters = (total - reserved) / sectorsPerCluster, rounded up.
 	dataSectors := totalSectors - fmtReservedSectors
@@ -88,8 +96,23 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 
 	minSectors := int64(fmtReservedSectors) + 2*fatSizeSectors + int64(fmtSectorsPerCluster)
 	if totalSectors < minSectors {
-		return nil, fmt.Errorf("fat32: format: size %d too small (minimum %d bytes)",
+		return fmtLayout{}, fmt.Errorf("fat32: format: size %d too small (minimum %d bytes)",
 			sizeBytes, minSectors*fmtBytesPerSector)
+	}
+	return fmtLayout{totalSectors: totalSectors, fatSizeSectors: fatSizeSectors}, nil
+}
+
+// Format creates a new FAT32 filesystem in the file at path.
+// The file is created (or truncated) and formatted. sizeBytes must be a
+// multiple of the cluster size (4096) and large enough to hold the reserved
+// area, two FATs, and at least one data cluster.
+//
+// On success the newly formatted filesystem is opened and returned; the
+// caller must Close it when done.
+func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesystem, error) {
+	l, err := formatLayout(sizeBytes)
+	if err != nil {
+		return nil, err
 	}
 
 	f, err := formatOpenFile(path)
@@ -99,6 +122,90 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 	if err := f.Truncate(sizeBytes); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("fat32: format: truncate: %w", err)
+	}
+
+	// A file just truncated to its size reads back as zeros, so only the
+	// metadata that is not zero is written.
+	if err := writeFormat(f, l, cfg, false); err != nil {
+		f.Close()
+		return nil, err
+	}
+
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("fat32: format: close: %w", err)
+	}
+
+	return formatOpenFS(path, -1)
+}
+
+// ReaderWriterAt is the image FormatImage formats: anything that can be read
+// and written at an offset, such as a buffer in memory.
+type ReaderWriterAt interface {
+	io.ReaderAt
+	io.WriterAt
+}
+
+// FormatImage creates a new FAT32 filesystem in the first sizeBytes of rw and
+// opens it, with the same layout and size rules as Format.
+//
+// It is Format without a path: for a caller that has no host file to give --
+// a WebAssembly page building an image in memory, a test, a partition inside
+// a larger image. rw must already hold at least sizeBytes; FormatImage never
+// grows it.
+//
+// Unlike Format, which writes a file it has just truncated, FormatImage cannot
+// assume rw reads back as zeros. It therefore writes zeros over every region
+// a FAT32 reader interprets -- the reserved sectors, both FATs and the root
+// directory cluster -- so a reused buffer holding an older volume does not
+// leak entries into the new one. Data clusters are left as they are: they are
+// free in the new FAT, and nothing reads a free cluster.
+//
+// The returned filesystem reads and writes through rw (see OpenReader); it
+// does not close rw.
+func FormatImage(rw ReaderWriterAt, sizeBytes int64, cfg FormatConfig) (filesystem.Filesystem, error) {
+	if rw == nil {
+		return nil, errors.New("fat32: format: FormatImage needs an image")
+	}
+	l, err := formatLayout(sizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeFormat(rw, l, cfg, true); err != nil {
+		return nil, err
+	}
+	return OpenReader(rw, sizeBytes)
+}
+
+// fmtZeroChunk bounds the buffer used to zero the metadata regions, so
+// formatting a large image does not allocate the size of its FATs.
+const fmtZeroChunk = 64 << 10
+
+// zeroRange writes n zero bytes at off, in chunks of at most fmtZeroChunk.
+func zeroRange(w io.WriterAt, off, n int64) error {
+	buf := make([]byte, min(n, fmtZeroChunk))
+	for n > 0 {
+		k := min(n, int64(len(buf)))
+		if _, err := w.WriteAt(buf[:k], off); err != nil {
+			return err
+		}
+		off += k
+		n -= k
+	}
+	return nil
+}
+
+// writeFormat writes the boot sector, its backup, FSInfo, the first FAT
+// entries of both FATs and the volume-label entry. With zero set it first
+// clears every region those structures live in.
+func writeFormat(w io.WriterAt, l fmtLayout, cfg FormatConfig, zero bool) error {
+	dataOff := int64(fmtReservedSectors+fmtFATCount*l.fatSizeSectors) * fmtBytesPerSector
+	rootOff := dataOff + int64(fmtRootCluster-2)*fmtClusterSize
+	if zero {
+		// Reserved area + both FATs are contiguous, and the root cluster
+		// follows them directly.
+		if err := zeroRange(w, 0, rootOff+fmtClusterSize); err != nil {
+			return fmt.Errorf("fat32: format: clear metadata: %w", err)
+		}
 	}
 
 	volumeID := cfg.VolumeID
@@ -136,8 +243,8 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 	le.PutUint16(boot[24:], 63)  // sectors per track (dummy)
 	le.PutUint16(boot[26:], 255) // number of heads (dummy)
 	// boot[28:32] hidden sectors = 0
-	le.PutUint32(boot[32:], uint32(totalSectors))
-	le.PutUint32(boot[36:], uint32(fatSizeSectors))
+	le.PutUint32(boot[32:], uint32(l.totalSectors))
+	le.PutUint32(boot[36:], uint32(l.fatSizeSectors))
 	// boot[40:42] ext flags = 0 (both FATs active, mirrored)
 	le.PutUint16(boot[42:], 0) // filesystem version 0.0
 	le.PutUint32(boot[44:], fmtRootCluster)
@@ -150,14 +257,12 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 	copy(boot[82:90], []byte("FAT32   "))
 	boot[510] = 0x55
 	boot[511] = 0xAA
-	if _, err := f.WriteAt(boot, 0); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("fat32: format: write boot sector: %w", err)
+	if _, err := w.WriteAt(boot, 0); err != nil {
+		return fmt.Errorf("fat32: format: write boot sector: %w", err)
 	}
 	// Write backup boot sector.
-	if _, err := f.WriteAt(boot, int64(fmtBackupBootSector)*fmtBytesPerSector); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("fat32: format: write backup boot sector: %w", err)
+	if _, err := w.WriteAt(boot, int64(fmtBackupBootSector)*fmtBytesPerSector); err != nil {
+		return fmt.Errorf("fat32: format: write backup boot sector: %w", err)
 	}
 
 	// ── FSInfo sector ────────────────────────────────────────────────────────
@@ -167,9 +272,8 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 	le.PutUint32(fsinfo[488:], 0xFFFFFFFF) // free count: unknown
 	le.PutUint32(fsinfo[492:], 0xFFFFFFFF) // next free: unknown
 	le.PutUint32(fsinfo[508:], 0xAA550000) // trail signature
-	if _, err := f.WriteAt(fsinfo, int64(fmtFSInfoSector)*fmtBytesPerSector); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("fat32: format: write FSInfo: %w", err)
+	if _, err := w.WriteAt(fsinfo, int64(fmtFSInfoSector)*fmtBytesPerSector); err != nil {
+		return fmt.Errorf("fat32: format: write FSInfo: %w", err)
 	}
 
 	// ── FAT regions ──────────────────────────────────────────────────────────
@@ -180,10 +284,9 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 	le.PutUint32(fatEntry[8:], 0x0FFFFFFF) // FAT[2] = root cluster: EOC
 
 	for i := int64(0); i < fmtFATCount; i++ {
-		fatOff := int64(fmtReservedSectors+i*fatSizeSectors) * fmtBytesPerSector
-		if _, err := f.WriteAt(fatEntry, fatOff); err != nil {
-			f.Close()
-			return nil, fmt.Errorf("fat32: format: write FAT %d: %w", i, err)
+		fatOff := int64(fmtReservedSectors+i*l.fatSizeSectors) * fmtBytesPerSector
+		if _, err := w.WriteAt(fatEntry, fatOff); err != nil {
+			return fmt.Errorf("fat32: format: write FAT %d: %w", i, err)
 		}
 	}
 
@@ -194,20 +297,12 @@ func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesyst
 	// entry is reported as an error and makes `fsck -n` exit non-zero. Mirror
 	// the space-padded BPB label into the root cluster so the volume is clean.
 	if hasNonSpace(label) {
-		dataOff := int64(fmtReservedSectors+fmtFATCount*fatSizeSectors) * fmtBytesPerSector
-		rootOff := dataOff + int64(fmtRootCluster-2)*clusterSize
 		var volEntry [dirEntrySize]byte
 		copy(volEntry[0:11], label) // already space-padded to 11 bytes
 		volEntry[11] = fatAttrVolumeID
-		if _, err := f.WriteAt(volEntry[:], rootOff); err != nil {
-			f.Close()
-			return nil, fmt.Errorf("fat32: format: write volume-label entry: %w", err)
+		if _, err := w.WriteAt(volEntry[:], rootOff); err != nil {
+			return fmt.Errorf("fat32: format: write volume-label entry: %w", err)
 		}
 	}
-
-	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("fat32: format: close: %w", err)
-	}
-
-	return formatOpenFS(path, -1)
+	return nil
 }

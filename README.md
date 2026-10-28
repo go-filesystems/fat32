@@ -75,6 +75,12 @@ type FormatConfig struct {
 
 func Format(path string, sizeBytes int64, cfg FormatConfig) (filesystem.Filesystem, error)
 func Open(imagePath string, partIndex int) (filesystem.Filesystem, error)
+
+// Format without a host file: an image in memory, a WebAssembly page.
+// rw must already hold sizeBytes; the metadata regions are zeroed first,
+// so a reused buffer is safe.
+func FormatImage(rw ReaderWriterAt, sizeBytes int64, cfg FormatConfig) (filesystem.Filesystem, error)
+func OpenReader(r io.ReaderAt, size int64) (filesystem.Filesystem, error)
 ```
 
 ### Read / Write
