@@ -158,6 +158,9 @@ func (f *fat32File) Sync() error {
 	}
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+	if err := f.fs.flushFSInfo(); err != nil {
+		return fmt.Errorf("fat32: write FSInfo: %w", err)
+	}
 	if s, ok := f.fs.f.(interface{ Sync() error }); ok {
 		if err := s.Sync(); err != nil {
 			return fmt.Errorf("fat32: sync image: %w", err)

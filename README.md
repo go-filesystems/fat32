@@ -26,6 +26,7 @@ Supports bare filesystem images and MBR/GPT partitioned disks, full directory tr
 | Truncate | ✅ | `Truncate(path, newSize)` (`filesystem.Truncater`) |
 | Grow / Shrink / Resize | ✅ | `filesystem.Resizer` — `Resize` dispatches to `Grow` or `Shrink` |
 | Partitioned images | ✅ | MBR/GPT supported |
+| fsck-clean images | ✅ | `fsck_msdos -n` (macOS) and `fsck.vfat -n` (dosfstools) exit 0 on what the driver writes: `..` of a directory under the root holds cluster 0, and the FSInfo free count and next-free hint are exact at format and kept current (written after each directory write and on `Close`; counted once per open, never per allocation, and never trusted from the image) |
 
 ## Limitations
 

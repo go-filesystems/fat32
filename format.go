@@ -269,11 +269,22 @@ func writeFormat(w io.WriterAt, l fmtLayout, cfg FormatConfig, zero bool) error 
 	fsinfo := make([]byte, fmtBytesPerSector)
 	le.PutUint32(fsinfo[0:], 0x41615252)   // lead signature
 	le.PutUint32(fsinfo[484:], 0x61417272) // structure signature
-	le.PutUint32(fsinfo[488:], 0xFFFFFFFF) // free count: unknown
-	le.PutUint32(fsinfo[492:], 0xFFFFFFFF) // next free: unknown
+	// Free count: every data cluster but the root directory's. fsck tools
+	// report an unknown (0xFFFFFFFF) count as unset. Next free: the cluster
+	// after the root.
+	dataClusters := (l.totalSectors - fmtReservedSectors - fmtFATCount*l.fatSizeSectors) / fmtSectorsPerCluster
+	if fatEntries := l.fatSizeSectors*fmtBytesPerSector/4 - 2; fatEntries < dataClusters {
+		dataClusters = fatEntries
+	}
+	le.PutUint32(fsinfo[488:], uint32(dataClusters-1))
+	le.PutUint32(fsinfo[492:], fmtRootCluster+1)
 	le.PutUint32(fsinfo[508:], 0xAA550000) // trail signature
 	if _, err := w.WriteAt(fsinfo, int64(fmtFSInfoSector)*fmtBytesPerSector); err != nil {
 		return fmt.Errorf("fat32: format: write FSInfo: %w", err)
+	}
+	// The specification keeps a copy at sector 7, after the backup boot sector.
+	if _, err := w.WriteAt(fsinfo, int64(fmtBackupBootSector+1)*fmtBytesPerSector); err != nil {
+		return fmt.Errorf("fat32: format: write backup FSInfo: %w", err)
 	}
 
 	// ── FAT regions ──────────────────────────────────────────────────────────

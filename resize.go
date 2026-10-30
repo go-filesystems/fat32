@@ -461,6 +461,9 @@ func (fs *fat32FS) bootSectorOffsets() []int64 {
 // signature doesn't match, we leave the sector alone rather than overwrite
 // something that isn't an FSInfo.
 func (fs *fat32FS) refreshFSInfo() error {
+	// The geometry may have changed: the cached count is recounted lazily on
+	// the next FAT change (see fsinfo.go).
+	fs.invalidateFreeCount()
 	if fs.info.FSInfoSector == 0 {
 		return nil
 	}

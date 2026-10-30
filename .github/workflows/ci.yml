@@ -50,8 +50,10 @@ jobs:
       # mtools is the foreign reader: mdir lists an image WE wrote, so the
       # listing is another implementation's opinion rather than our own.
       # It reads an image FILE and needs no privilege.
-      - name: mtools, as a foreign reader of what we write
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq mtools
+      # dosfstools provides fsck.vfat: the fsck integration tests run `-n` on
+      # images we write and require exit 0 (they skip when it is absent).
+      - name: mtools and dosfstools, as foreign readers of what we write
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mtools dosfstools
 
       - name: Vet
         working-directory: fat32

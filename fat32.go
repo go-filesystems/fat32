@@ -113,6 +113,7 @@ type fat32FS struct {
 	f          diskRW
 	partOffset int64
 	info       Info
+	fsi        fsInfoState // FSInfo free-count cache, see fsinfo.go
 }
 
 var (
@@ -151,8 +152,15 @@ func Open(imagePath string, partIndex int) (filesystem.Filesystem, error) {
 	return &fat32FS{f: f, partOffset: off, info: info}, nil
 }
 
-// Close releases the underlying file handle.
-func (fs *fat32FS) Close() error { return fs.f.Close() }
+// Close writes the FSInfo free count if it changed and releases the
+// underlying file handle. The handle is closed even when the write fails.
+func (fs *fat32FS) Close() error {
+	ferr := fs.flushFSInfo()
+	if err := fs.f.Close(); err != nil {
+		return err
+	}
+	return ferr
+}
 
 // Info returns the decoded boot-sector metadata.
 func (fs *fat32FS) Info() Info { return fs.info }
@@ -305,8 +313,11 @@ func (fs *fat32FS) MkDir(path string, perm os.FileMode) error {
 	binary.LittleEndian.PutUint16(clusterBuf[26:28], uint16(cluster))
 	copy(clusterBuf[32:43], []byte("..         "))
 	clusterBuf[43] = fatAttrDirectory
-	binary.LittleEndian.PutUint16(clusterBuf[52:54], uint16(parentCluster>>16))
-	binary.LittleEndian.PutUint16(clusterBuf[58:60], uint16(parentCluster))
+	// fatgen103 section 6.5: the ".." entry of a directory whose parent is the
+	// root directory holds cluster 0, not the root's cluster number.
+	dotdot := fs.dotDotCluster(parentCluster)
+	binary.LittleEndian.PutUint16(clusterBuf[52:54], uint16(dotdot>>16))
+	binary.LittleEndian.PutUint16(clusterBuf[58:60], uint16(dotdot))
 	clusterOff := fs.info.DataOffset(fs.partOffset) + int64(cluster-2)*int64(fs.info.ClusterSize())
 	if _, err := fs.f.WriteAt(clusterBuf, clusterOff); err != nil {
 		return fmt.Errorf("fat32: write directory cluster: %w", err)
@@ -480,7 +491,14 @@ func (fs *fat32FS) Rename(oldPath, newPath string) error {
 		if err := fs.writeDirBuf(oldParentCluster, oldBuf); err != nil {
 			return err
 		}
-		return fs.writeDirBuf(newParentCluster, newBuf)
+		if err := fs.writeDirBuf(newParentCluster, newBuf); err != nil {
+			return err
+		}
+		// A moved directory's ".." must name its new parent.
+		if oldAttr&fatAttrDirectory != 0 && oldCluster >= 2 {
+			return fs.setDotDot(oldCluster, newParentCluster)
+		}
+		return nil
 	}
 	// Same-parent rename: destBuf is the (possibly grown) oldBuf.
 	oldBuf = destBuf
@@ -873,6 +891,15 @@ func (fs *fat32FS) readDirBuf(startCluster uint32) ([]byte, error) {
 // allocating fresh clusters from the FAT and linking them in. This makes the
 // root directory (and any subdirectory) grow uniformly past the first cluster.
 func (fs *fat32FS) writeDirBuf(startCluster uint32, buf []byte) error {
+	err := fs.writeDirBufChain(startCluster, buf)
+	// A directory write ends every operation that allocates or frees clusters,
+	// so this is where the FSInfo count catches up. The write is advisory: a
+	// failure leaves the cache dirty and Close tries again.
+	_ = fs.flushFSInfo()
+	return err
+}
+
+func (fs *fat32FS) writeDirBufChain(startCluster uint32, buf []byte) error {
 	clusterSize := int64(fs.info.ClusterSize())
 	dataBase := fs.info.DataOffset(fs.partOffset)
 	fatBase := fs.info.FATOffset(fs.partOffset)
@@ -1610,6 +1637,7 @@ func (fs *fat32FS) setFATEntry(cluster uint32, value uint32) error {
 	fatBase := fs.info.FATOffset(fs.partOffset)
 	fatBytes := int64(fs.info.FATSize) * int64(fs.info.BytesPerSector)
 	off := fatBase + int64(cluster)*4
+	fs.ensureFreeCount() // counts BEFORE this write, so the delta below is exact
 	var buf [4]byte
 	if _, err := fs.f.ReadAt(buf[:], off); err != nil {
 		return fmt.Errorf("fat32: read FAT entry for cluster %d: %w", cluster, err)
@@ -1619,8 +1647,42 @@ func (fs *fat32FS) setFATEntry(cluster uint32, value uint32) error {
 	for i := uint8(0); i < fs.info.FATCount; i++ {
 		mirrorOff := off + int64(i)*fatBytes
 		if _, err := fs.f.WriteAt(buf[:], mirrorOff); err != nil {
+			// The FAT may be half-updated: stop trusting the cached count.
+			fs.invalidateFreeCount()
 			return fmt.Errorf("fat32: write FAT%d entry for cluster %d: %w", i, cluster, err)
 		}
+	}
+	fs.noteFATChange(cluster, existing, value)
+	return nil
+}
+
+// dotDotCluster is the value a ".." entry holds for a directory whose parent
+// is parentCluster: 0 for the root directory (fatgen103 section 6.5), the
+// parent's first cluster otherwise.
+func (fs *fat32FS) dotDotCluster(parentCluster uint32) uint32 {
+	if parentCluster == fs.info.RootCluster {
+		return 0
+	}
+	return parentCluster
+}
+
+// setDotDot rewrites the ".." entry in the first cluster of the directory at
+// dirCluster so it names parentCluster. A directory whose second entry is not
+// ".." (a hand-made or damaged image) is left alone.
+func (fs *fat32FS) setDotDot(dirCluster, parentCluster uint32) error {
+	off := fs.info.DataOffset(fs.partOffset) + int64(dirCluster-2)*int64(fs.info.ClusterSize()) + dirEntrySize
+	var ent [dirEntrySize]byte
+	if _, err := fs.f.ReadAt(ent[:], off); err != nil {
+		return fmt.Errorf("fat32: read \"..\" entry: %w", err)
+	}
+	if string(ent[0:11]) != "..         " {
+		return nil
+	}
+	v := fs.dotDotCluster(parentCluster)
+	binary.LittleEndian.PutUint16(ent[20:22], uint16(v>>16))
+	binary.LittleEndian.PutUint16(ent[26:28], uint16(v))
+	if _, err := fs.f.WriteAt(ent[:], off); err != nil {
+		return fmt.Errorf("fat32: write \"..\" entry: %w", err)
 	}
 	return nil
 }

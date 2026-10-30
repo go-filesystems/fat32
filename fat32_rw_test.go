@@ -1479,7 +1479,9 @@ func TestFSInfoFreeCountMatchesFAT(t *testing.T) {
 	// (which fsck.fat treats as clean and recomputes) or, if maintained, the
 	// exact FAT-derived count. A finite value that disagrees with the FAT is
 	// the "Free cluster summary wrong" defect this test guards against.
-	if fsiFree != 0xFFFFFFFF && fsiFree != fatFree {
+	// "Unknown" no longer passes: fsck_msdos reports it as "Free space in
+	// FSInfo block is unset" and exits 206.
+	if fsiFree != fatFree {
 		t.Errorf("FSInfo free count = %d, FAT-derived free = %d (off by %d)",
 			fsiFree, fatFree, int64(fsiFree)-int64(fatFree))
 	}
