@@ -27,7 +27,7 @@ Supports bare filesystem images and MBR/GPT partitioned disks, full directory tr
 | Grow / Shrink / Resize | ✅ | `filesystem.Resizer` — `Resize` dispatches to `Grow` or `Shrink` |
 | Partitioned images | ✅ | MBR/GPT supported |
 | FAT12 / FAT16 (read) | ✅ | `Open` / `OpenReader` read what `newfs_msdos -F 12\|16` and `mkfs.vfat` make below ~33 MiB, including `OpenFile` + `ReadAt`; see [FAT12 and FAT16](#fat12-and-fat16) |
-| FAT12 / FAT16 (write) | ⚠️ No | every mutation (`WriteFile`, `MkDir`, `Delete*`, `Rename`, `Truncate`, `SetLabel`, `Resize`, `File.WriteAt`) returns `ErrReadOnlyFAT` |
+| FAT12 / FAT16 (write) | ✅ | everything but `Resize`/`Grow`/`Shrink` (`ErrResizeFAT`); the fixed root cannot grow, a full root refuses creates; see [FAT12 and FAT16](#fat12-and-fat16) |
 | fsck-clean images | ✅ | `fsck_msdos -n` (macOS) and `fsck.vfat -n` (dosfstools) exit 0 on what the driver writes: `..` of a directory under the root holds cluster 0, and the FSInfo free count and next-free hint are exact at format and kept current (written after each directory write and on `Close`; counted once per open, never per allocation, and never trusted from the image) |
 
 ## FAT12 and FAT16
@@ -51,11 +51,29 @@ against Linux `fs/fat/inode.c`:
   forged `BytsPerSec`, `NumFATs`, `RootEntCnt` or sector count is an error on
   a 32-bit host too.
 
-**FAT12/16 volumes are read-only in this release**: writing returns
-`ErrReadOnlyFAT` and leaves the image untouched. Write support is tracked as a
-follow-up. The test images in `testdata/` were formatted by `newfs_msdos` and
-populated by mtools (`testdata/mkfixtures`), and `FuzzOpenFAT1216` drives the
-read surface.
+**Writing works too** (since v0.7.0): `WriteFile`, `MkDir`, `DeleteFile`,
+`DeleteDir`, `Rename`, `Truncate`, `SetLabel`, and `File.WriteAt`/`Truncate`.
+
+- 12-bit entries are written as a read-modify-write of the packed word, so the
+  neighbouring entry is kept, a sector-straddling entry is no special case, and
+  every FAT copy (`NumFATs`) is written. There is no FSInfo sector and none is
+  written. Allocation stays inside the volume, below the bad-cluster mark.
+- The fixed root directory never grows. When it is full (long-name entries
+  count against `BPB_RootEntCnt`), a create or rename into it fails with
+  `directory is full` and the volume is unchanged.
+- A failed write does not leave a chain dangling: new data is written before
+  the old chain is freed, a directory entry is removed before its clusters are
+  freed, and a shrink writes the entry first. The worst an interruption leaves
+  is clusters in use that nothing references (fsck reclaims them).
+- **`Resize`, `Grow` and `Shrink` are not supported on FAT12/16**: they return
+  `ErrResizeFAT` and change nothing.
+
+The test images in `testdata/` were formatted by `newfs_msdos` and populated by
+mtools (`testdata/mkfixtures`). After every mutation scenario the image is
+checked by `fsck_msdos -n` (or `fsck.vfat -n`), a structural checker, equality
+of the FAT copies, and, for one scenario, mtools and a read-only OS mount.
+`FuzzOpenFAT1216` drives the read surface and `FuzzWriteFAT1216` a random
+sequence of mutations; both corpora are committed.
 
 ## Untrusted input
 

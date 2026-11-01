@@ -372,49 +372,31 @@ func (w windowReader) ReadAt(p []byte, off int64) (int, error) {
 	return copy(p, w.b[off:]), nil
 }
 
-// FAT12/16 volumes are read-only: every mutation says so.
-func TestFAT1216WritesRefused(t *testing.T) {
+// Resizing a FAT12/16 volume is the one mutation not supported: it says so and
+// leaves the image untouched.
+func TestFAT1216ResizeRefused(t *testing.T) {
 	for _, typ := range []int{12, 16} {
 		_, img := f1216Fixture(t, typ)
-		// Writable reader, so the refusal is the FAT type's and not the reader's.
 		fs, err := OpenReader(&rwBuf{img}, int64(len(img)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		before := append([]byte(nil), img...)
 		checks := map[string]error{
-			"WriteFile": fs.WriteFile("/X.TXT", []byte("x"), 0o644),
-			"MkDir":     fs.MkDir("/D", 0o755),
-			"Delete":    fs.DeleteFile("/HELLO.TXT"),
-			"DeleteDir": fs.DeleteDir("/DIR1"),
-			"Rename":    fs.Rename("/HELLO.TXT", "/H2.TXT"),
-			"Truncate":  fs.(interface{ Truncate(string, int64) error }).Truncate("/HELLO.TXT", 1),
-			"SetLabel":  fs.(interface{ SetLabel(string) error }).SetLabel("NEW"),
-			"Resize":    fs.(interface{ Resize(int64) error }).Resize(int64(len(img)) * 2),
-			"Grow":      fs.(*fat32FS).Grow(int64(len(img)) * 2),
-			"Shrink":    fs.(*fat32FS).Shrink(int64(len(img)) / 2),
+			"Resize": fs.(interface{ Resize(int64) error }).Resize(int64(len(img)) * 2),
+			"Grow":   fs.(*fat32FS).Grow(int64(len(img)) * 2),
+			"Shrink": fs.(*fat32FS).Shrink(int64(len(img)) / 2),
 		}
 		for name, err := range checks {
-			if !errors.Is(err, ErrReadOnlyFAT) {
-				t.Errorf("FAT%d %s: error = %v, want ErrReadOnlyFAT", typ, name, err)
+			if !errors.Is(err, ErrResizeFAT) {
+				t.Errorf("FAT%d %s: error = %v, want ErrResizeFAT", typ, name, err)
 			}
-		}
-		h, err := fs.(*fat32FS).OpenFile("/HELLO.TXT")
-		if err != nil {
-			t.Fatal(err)
-		}
-		wf := h.(*fat32File)
-		if _, err := wf.WriteAt([]byte("zz"), 0); !errors.Is(err, ErrReadOnlyFAT) {
-			t.Errorf("FAT%d File.WriteAt: %v", typ, err)
-		}
-		if err := wf.Truncate(1); !errors.Is(err, ErrReadOnlyFAT) {
-			t.Errorf("FAT%d File.Truncate: %v", typ, err)
 		}
 		if err := fs.Close(); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 		if !bytes.Equal(before, img) {
-			t.Errorf("FAT%d: a refused write changed the image", typ)
+			t.Errorf("FAT%d: a refused resize changed the image", typ)
 		}
 	}
 }

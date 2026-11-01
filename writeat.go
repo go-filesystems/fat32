@@ -68,9 +68,6 @@ func (f *fat32File) WriteAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("fat32: WriteAt: negative offset %d", off)
 	}
-	if err := f.fs.checkWritable(); err != nil {
-		return 0, err
-	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -124,9 +121,6 @@ func (f *fat32File) WriteAt(p []byte, off int64) (int, error) {
 func (f *fat32File) Truncate(size int64) error {
 	if f.closed.Load() {
 		return os.ErrClosed
-	}
-	if err := f.fs.checkWritable(); err != nil {
-		return err
 	}
 	if size < 0 {
 		return fmt.Errorf("fat32: Truncate: negative size %d", size)
@@ -256,7 +250,7 @@ func (f *fat32File) growLocked(newClusters int64) error {
 	// Claim each cluster before writing to it: an unmarked cluster is free,
 	// and a second allocation in the same volume would hand it out again.
 	for _, c := range run {
-		if err := f.fs.setFATEntry(c, 0x0FFFFFFF); err != nil {
+		if err := f.fs.setFATEntry(c, f.fs.eocMark()); err != nil {
 			rollback()
 			return err
 		}
@@ -298,7 +292,7 @@ func (f *fat32File) shrinkLocked(newClusters int64) error {
 		// outcome is clusters marked in use that nothing references, which
 		// fsck reports and repairs. The reverse order would leave the file
 		// pointing at clusters marked free — the failure that loses data.
-		if err := f.fs.setFATEntry(f.clusters[newClusters-1], 0x0FFFFFFF); err != nil {
+		if err := f.fs.setFATEntry(f.clusters[newClusters-1], f.fs.eocMark()); err != nil {
 			return err
 		}
 	}
@@ -327,6 +321,9 @@ func (f *fat32File) shrinkLocked(newClusters int64) error {
 func (fs *fat32FS) allocClusterRun(n int) ([]uint32, error) {
 	if n <= 0 {
 		return nil, nil
+	}
+	if fs.info.fixedRoot() {
+		return fs.freeRun(n)
 	}
 	last := int64(fs.info.TotalSectors/uint32(fs.info.SectorsPerCluster)) + 2
 	if fatEntries := int64(fs.info.FATSize) * int64(fs.info.BytesPerSector) / 4; fatEntries < last {

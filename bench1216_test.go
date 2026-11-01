@@ -81,3 +81,53 @@ func BenchmarkReadFileFATWidth(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkWriteFileFATWidth writes (overwrites) the same 300000-byte file on a
+// FAT16 volume (the fixture, as a file) and on a FAT32 volume.
+func BenchmarkWriteFileFATWidth(b *testing.B) {
+	f, err := os.Open("testdata/fat16.img.gz")
+	if err != nil {
+		b.Fatal(err)
+	}
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		b.Fatal(err)
+	}
+	img, err := io.ReadAll(zr)
+	f.Close()
+	if err != nil {
+		b.Fatal(err)
+	}
+	p16 := filepath.Join(b.TempDir(), "w16.img")
+	if err := os.WriteFile(p16, img, 0o600); err != nil {
+		b.Fatal(err)
+	}
+	fat16, err := fat32.Open(p16, -1)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer fat16.Close()
+	fat32fs, err := fat32.Format(filepath.Join(b.TempDir(), "w32.img"), 64<<20, fat32.FormatConfig{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer fat32fs.Close()
+	if err := fat32fs.MkDir("/MANY", 0o755); err != nil {
+		b.Fatal(err)
+	}
+	data := make([]byte, 300000)
+	for _, c := range []struct {
+		name string
+		fs   filesystem.Filesystem
+	}{{"FAT16", fat16}, {"FAT32", fat32fs}} {
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(data)))
+			for i := 0; i < b.N; i++ {
+				if err := c.fs.WriteFile("/MANY/BIGW.BIN", data, 0o644); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
