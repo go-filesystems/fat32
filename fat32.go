@@ -745,6 +745,12 @@ func (fs *fat32FS) growChain(firstCluster uint32, oldClusters, newClusters, oldS
 	return firstCluster, nil
 }
 
+// maxLFNChars is the longest a long file name can be: 255 UTF-16 code units, in
+// at most 20 directory entries of 13. A run of long-name entries that adds up
+// to more is not a name, and gathering it only costs: each entry's characters
+// are put in front of the rest, so k entries copy O(k^2) characters.
+const maxLFNChars = 255
+
 // maxBytesPerSector is the largest logical sector a FAT volume can have.
 const maxBytesPerSector = 4096
 
@@ -1020,6 +1026,7 @@ func (fs *fat32FS) writeDirBufChain(startCluster uint32, buf []byte) error {
 func fat32FindEntry(buf []byte, name string) (int, int, bool) {
 	le := binary.LittleEndian
 	var lfnChars []uint16
+	lfnBad := false // the run so far is longer than any name can be
 	lfnStart := -1
 	lfnCount := 0
 	for offset := 0; offset+dirEntrySize <= len(buf); offset += dirEntrySize {
@@ -1030,6 +1037,7 @@ func fat32FindEntry(buf []byte, name string) (int, int, bool) {
 		}
 		if b0 == 0xE5 {
 			lfnChars = nil
+			lfnBad = false
 			lfnStart = -1
 			lfnCount = 0
 			continue
@@ -1049,6 +1057,10 @@ func fat32FindEntry(buf []byte, name string) (int, int, bool) {
 				chars[n] = c
 				n++
 			}
+			if lfnBad || len(lfnChars)+n > maxLFNChars {
+				lfnBad, lfnChars = true, nil
+				continue
+			}
 			lfnChars = append(chars[:n], lfnChars...)
 			continue
 		}
@@ -1056,6 +1068,7 @@ func fat32FindEntry(buf []byte, name string) (int, int, bool) {
 		// must not match a lookup by name.
 		if entry[11]&fatAttrVolumeID != 0 {
 			lfnChars = nil
+			lfnBad = false
 			lfnStart = -1
 			lfnCount = 0
 			continue
@@ -1077,6 +1090,7 @@ func fat32FindEntry(buf []byte, name string) (int, int, bool) {
 			return startOff, count, true
 		}
 		lfnChars = nil
+		lfnBad = false
 		lfnStart = -1
 		lfnCount = 0
 	}
@@ -1426,6 +1440,7 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 	le := binary.LittleEndian
 	entries := make([]rootDirEntry, 0)
 	var lfnChars []uint16
+	lfnBad := false // the run so far is longer than any name can be
 	for offset := 0; offset+dirEntrySize <= len(buf); offset += dirEntrySize {
 		entry := buf[offset : offset+dirEntrySize]
 		switch entry[0] {
@@ -1433,6 +1448,7 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 			return entries
 		case 0xE5:
 			lfnChars = nil
+			lfnBad = false
 			continue
 		}
 		if entry[11] == fatAttrLongName {
@@ -1446,6 +1462,10 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 				chars[n] = c
 				n++
 			}
+			if lfnBad || len(lfnChars)+n > maxLFNChars {
+				lfnBad, lfnChars = true, nil
+				continue
+			}
 			lfnChars = append(chars[:n], lfnChars...)
 			continue
 		}
@@ -1453,6 +1473,7 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 		// file; skip it so it never surfaces in ListDir/Stat.
 		if entry[11]&fatAttrVolumeID != 0 {
 			lfnChars = nil
+			lfnBad = false
 			continue
 		}
 		var name string
@@ -1462,6 +1483,7 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 			name = shortName(entry)
 		}
 		lfnChars = nil
+		lfnBad = false
 		entries = append(entries, rootDirEntry{
 			cluster: uint32(le.Uint16(entry[20:22]))<<16 | uint32(le.Uint16(entry[26:28])),
 			name:    name,

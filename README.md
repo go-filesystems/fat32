@@ -40,6 +40,10 @@ out-of-memory kill:
   `uint16`, and 32768-byte sectors made every cluster buffer 4 MiB;
 - a directory is at most 65536 entries of 32 bytes, 2 MiB (Linux
   `FAT_MAX_DIR_SIZE`), however large the cluster;
+- a long file name is at most 255 characters (20 entries of 13); a longer run
+  of long-name entries is not gathered and the file keeps its short name. The
+  parsers used to prepend each entry to everything gathered so far, so a
+  2 MiB directory of long-name entries copied about 55 GB;
 - `Resize` reads the first FAT only after proving the whole FAT is in the
   image (a 128 GiB FAT claim allocated 137 GB before this).
 
