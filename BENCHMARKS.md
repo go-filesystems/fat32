@@ -88,12 +88,25 @@ per cluster the FAT16 path allocates no more than FAT32.
 volumes as above. Allocation counts are exact; times were taken at a 1-minute
 load above 40 and are not published.
 
-| volume | allocs/op | clusters | allocs per cluster |
-|---|---:|---:|---:|
-| FAT16 (1 KiB clusters) | 2769 | 293 | 9.5 |
-| FAT32 (4 KiB clusters) | 411 | 74 | 5.6 |
+v0.7.0 (FAT12/16 first writable), then v0.7.1 (pooled FAT-entry buffer):
 
-FAT12/16 allocate more per cluster: each FAT entry read or written is a 2-byte
-`ReadAt`/`WriteAt` per FAT copy whose buffer escapes through the `io.ReaderAt`
-interface, where the FAT32 allocator batches its scans. Batching them is an
-open item.
+| volume | v0.7.0 allocs/op | v0.7.1 allocs/op | clusters | v0.7.1 allocs per cluster |
+|---|---:|---:|---:|---:|
+| FAT16 (1 KiB clusters) | 2769 | 131 | 293 | 0.45 |
+| FAT32 (4 KiB clusters) | 411 | 335 | 74 | 4.5 |
+
+Reading, v0.7.0 then v0.7.1 (same file, same volumes):
+
+| path | FAT16 allocs/op | FAT32 allocs/op | per cluster (16 / 32) |
+|---|---:|---:|---:|
+| `ReadFile` | 924, then 631 | 258, then 183 | 2.15 / 2.47 |
+| `OpenFile` + `ReadAt` | 327, then 34 | 101, then 26 | 0.12 / 0.35 |
+
+The 9.5 per cluster came from the 2-byte buffer of every FAT entry read or
+write escaping to the heap through the `io.ReaderAt` interface (one allocation
+per entry per FAT copy). The buffer is now lent from a `sync.Pool` (`fatScratch`)
+and the single-cluster allocator no longer builds a slice, so the FAT12/16 paths
+allocate no more per cluster than FAT32, on both reads and writes. The FAT32
+numbers fell too, because `fatEntry` serves all three widths. Entries are still
+written through, one at a time, to every FAT copy: no write-back cache, so the
+crash ordering of the write paths is unchanged.

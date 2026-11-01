@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // FATType is the width of one FAT entry: the variant of the format.
@@ -137,28 +138,30 @@ func (fs *fat32FS) setNarrowFATEntry(cluster, value uint32) error {
 	}
 	fatBase := fs.info.FATOffset(fs.partOffset)
 	fatBytes := int64(fs.info.FATSize) * int64(fs.info.BytesPerSector)
+	sc := fatScratch.Get().(*[4]byte)
+	defer fatScratch.Put(sc)
 	for i := uint8(0); i < fs.info.FATCount; i++ {
 		base := fatBase + int64(i)*fatBytes
-		var b [2]byte
+		b := sc[:2]
 		if fs.info.Type == FAT16 {
-			binary.LittleEndian.PutUint16(b[:], uint16(value))
-			if _, err := fs.f.WriteAt(b[:], base+int64(cluster)*2); err != nil {
+			binary.LittleEndian.PutUint16(b, uint16(value))
+			if _, err := fs.f.WriteAt(b, base+int64(cluster)*2); err != nil {
 				return fmt.Errorf("fat32: write FAT%d entry for cluster %d: %w", i, cluster, err)
 			}
 			continue
 		}
 		off := base + int64(cluster) + int64(cluster)/2
-		if _, err := fs.f.ReadAt(b[:], off); err != nil {
+		if _, err := fs.f.ReadAt(b, off); err != nil {
 			return fmt.Errorf("fat32: read FAT%d entry for cluster %d: %w", i, cluster, err)
 		}
-		w := binary.LittleEndian.Uint16(b[:])
+		w := binary.LittleEndian.Uint16(b)
 		if cluster&1 == 1 {
 			w = w&0x000F | uint16(value&0xFFF)<<4
 		} else {
 			w = w&0xF000 | uint16(value&0xFFF)
 		}
-		binary.LittleEndian.PutUint16(b[:], w)
-		if _, err := fs.f.WriteAt(b[:], off); err != nil {
+		binary.LittleEndian.PutUint16(b, w)
+		if _, err := fs.f.WriteAt(b, off); err != nil {
 			return fmt.Errorf("fat32: write FAT%d entry for cluster %d: %w", i, cluster, err)
 		}
 	}
@@ -180,12 +183,29 @@ func (fs *fat32FS) writeFixedRoot(buf []byte) error {
 
 // allocNarrow returns the first free cluster of a FAT12/16 volume.
 func (fs *fat32FS) allocNarrow() (uint32, error) {
-	run, err := fs.freeRun(1)
-	if err != nil {
-		return 0, err
+	start := fs.narrowHint.Load()
+	if start < 2 {
+		start = 2
 	}
-	return run[0], nil
+	for c := start; c < fs.lastCluster(); c++ {
+		v, err := fs.fatEntry(c)
+		if err != nil {
+			return 0, fmt.Errorf("fat32: read FAT entries from cluster %d: %w", c, err)
+		}
+		if v == 0 {
+			// The caller claims it before asking again.
+			fs.narrowHint.Store(c + 1)
+			return c, nil
+		}
+	}
+	fs.narrowHint.Store(fs.lastCluster())
+	return 0, fmt.Errorf("fat32: no free clusters")
 }
+
+// fatScratch lends the few bytes one FAT entry is read or written through. A
+// buffer handed to an io.ReaderAt escapes to the heap, so a stack array cost
+// one allocation per entry; this costs none once the pool is warm.
+var fatScratch = sync.Pool{New: func() any { return new([4]byte) }}
 
 // freeRun returns the first n free clusters of a FAT12/16 volume, starting
 // from the allocation hint.
@@ -250,16 +270,17 @@ func (fs *fat32FS) eocCluster() uint32 { return fs.badCluster() + 1 }
 // entry that straddles a sector boundary is read like any other.
 func (fs *fat32FS) fatEntry(cluster uint32) (uint32, error) {
 	fatBase := fs.info.FATOffset(fs.partOffset)
+	sc := fatScratch.Get().(*[4]byte)
+	defer fatScratch.Put(sc)
 	switch fs.info.Type {
 	case FAT12:
 		if cluster >= uint32(fs.info.DataClusters)+2 {
 			return 0, fmt.Errorf("fat32: cluster %d is outside the volume", cluster)
 		}
-		var b [2]byte
-		if _, err := fs.f.ReadAt(b[:], fatBase+int64(cluster)+int64(cluster)/2); err != nil {
+		if _, err := fs.f.ReadAt(sc[:2], fatBase+int64(cluster)+int64(cluster)/2); err != nil {
 			return 0, err
 		}
-		v := uint32(binary.LittleEndian.Uint16(b[:]))
+		v := uint32(binary.LittleEndian.Uint16(sc[:2]))
 		if cluster&1 == 1 {
 			return v >> 4, nil
 		}
@@ -268,17 +289,15 @@ func (fs *fat32FS) fatEntry(cluster uint32) (uint32, error) {
 		if cluster >= uint32(fs.info.DataClusters)+2 {
 			return 0, fmt.Errorf("fat32: cluster %d is outside the volume", cluster)
 		}
-		var b [2]byte
-		if _, err := fs.f.ReadAt(b[:], fatBase+int64(cluster)*2); err != nil {
+		if _, err := fs.f.ReadAt(sc[:2], fatBase+int64(cluster)*2); err != nil {
 			return 0, err
 		}
-		return uint32(binary.LittleEndian.Uint16(b[:])), nil
+		return uint32(binary.LittleEndian.Uint16(sc[:2])), nil
 	}
-	var b [4]byte
-	if _, err := fs.f.ReadAt(b[:], fatBase+int64(cluster)*4); err != nil {
+	if _, err := fs.f.ReadAt(sc[:], fatBase+int64(cluster)*4); err != nil {
 		return 0, err
 	}
-	return binary.LittleEndian.Uint32(b[:]) & 0x0FFFFFFF, nil
+	return binary.LittleEndian.Uint32(sc[:]) & 0x0FFFFFFF, nil
 }
 
 // readInfoFAT1216 decodes a boot sector whose BPB_FATSz16 is non-zero: the
