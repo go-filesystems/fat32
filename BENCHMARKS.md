@@ -81,3 +81,19 @@ and are deferred, not published.
 
 The totals differ because the file spans four times as many FAT16 clusters;
 per cluster the FAT16 path allocates no more than FAT32.
+
+## Writing a 300000-byte file, FAT16 versus FAT32
+
+`go test -run '^$' -bench WriteFileFATWidth -benchmem -benchtime 200x`, same
+volumes as above. Allocation counts are exact; times were taken at a 1-minute
+load above 40 and are not published.
+
+| volume | allocs/op | clusters | allocs per cluster |
+|---|---:|---:|---:|
+| FAT16 (1 KiB clusters) | 2769 | 293 | 9.5 |
+| FAT32 (4 KiB clusters) | 411 | 74 | 5.6 |
+
+FAT12/16 allocate more per cluster: each FAT entry read or written is a 2-byte
+`ReadAt`/`WriteAt` per FAT copy whose buffer escapes through the `io.ReaderAt`
+interface, where the FAT32 allocator batches its scans. Batching them is an
+open item.

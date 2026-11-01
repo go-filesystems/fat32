@@ -37,9 +37,6 @@ func (fs *fat32FS) Label() string {
 // The in-memory Info is refreshed so subsequent Label() calls observe
 // the new value without a reopen.
 func (fs *fat32FS) SetLabel(label string) error {
-	if err := fs.checkWritable(); err != nil {
-		return err
-	}
 	b := []byte(label)
 	if len(b) > MaxLabelLen {
 		return fmt.Errorf("fat32: label %q is %d bytes, exceeds maximum %d", label, len(b), MaxLabelLen)
@@ -51,6 +48,16 @@ func (fs *fat32FS) SetLabel(label string) error {
 	}
 	copy(padded, b)
 
+	// The fixed root directory of FAT12/16 can be full, in which case the
+	// volume-label entry cannot be created: find that out BEFORE the boot
+	// sector is touched, so a refused SetLabel changes nothing.
+	synced := false
+	if fs.info.fixedRoot() {
+		if err := fs.syncVolumeLabelEntry(padded); err != nil {
+			return fmt.Errorf("fat32 SetLabel: %w", err)
+		}
+		synced = true
+	}
 	if err := fs.writeLabelAt(padded, fs.partOffset); err != nil {
 		return err
 	}
@@ -65,8 +72,10 @@ func (fs *fat32FS) SetLabel(label string) error {
 	// Keep the root-directory volume-label entry in sync with the BPB label.
 	// Canonical fsck tools require the two to agree (a BPB label with no root
 	// entry, or a stale root entry, is flagged as an error).
-	if err := fs.syncVolumeLabelEntry(padded); err != nil {
-		return fmt.Errorf("fat32 SetLabel: %w", err)
+	if !synced {
+		if err := fs.syncVolumeLabelEntry(padded); err != nil {
+			return fmt.Errorf("fat32 SetLabel: %w", err)
+		}
 	}
 
 	fs.info.VolumeLabel = strings.TrimRight(string(padded), " \x00")
@@ -77,7 +86,7 @@ func (fs *fat32FS) SetLabel(label string) error {
 // root directory so it matches the 11-byte, space-padded label. When the label
 // is all-spaces (cleared), any existing volume-label entry is deleted.
 func (fs *fat32FS) syncVolumeLabelEntry(padded []byte) error {
-	buf, err := fs.readDirBuf(fs.info.RootCluster)
+	buf, err := fs.readDirBuf(fs.rootDir())
 	if err != nil {
 		return err
 	}
@@ -133,7 +142,7 @@ func (fs *fat32FS) syncVolumeLabelEntry(padded []byte) error {
 		copy(buf[freeSlot:freeSlot+11], padded)
 		buf[freeSlot+11] = fatAttrVolumeID
 	}
-	return fs.writeDirBuf(fs.info.RootCluster, buf)
+	return fs.writeDirBuf(fs.rootDir(), buf)
 }
 
 // writeLabelAt rewrites the 11-byte label slot inside the boot sector
@@ -154,7 +163,12 @@ func (fs *fat32FS) writeLabelAt(label []byte, absOff int64) error {
 		return fmt.Errorf("fat32 SetLabel: bytes-per-sector mismatch at 0x%x", absOff)
 	}
 
-	copy(buf[bsOffVolLab:bsOffVolLab+MaxLabelLen], label)
+	// The label is at 71 in the FAT32 extended boot record, at 43 in FAT12/16's.
+	labOff := bsOffVolLab
+	if fs.info.fixedRoot() {
+		labOff = 43
+	}
+	copy(buf[labOff:labOff+MaxLabelLen], label)
 	if _, err := fs.f.WriteAt(buf, absOff); err != nil {
 		return fmt.Errorf("fat32 SetLabel: write boot sector at 0x%x: %w", absOff, err)
 	}

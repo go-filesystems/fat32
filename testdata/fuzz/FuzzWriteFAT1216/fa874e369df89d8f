@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("11(0C01$91&\a2C0")
