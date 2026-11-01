@@ -65,3 +65,19 @@ sudo ./benchmarks/run.sh fat32 <repo_dir> <work_dir> 5
 `benchmarks/run.sh` is shared across the go-filesystems drivers;
 `benchmarks/bench.go` is the fat32 harness. Standalone `main` package, excluded
 from the coverage gate.
+
+## FAT16 versus FAT32, reading one 300000-byte file
+
+`go test -run '^$' -bench ReadFileFATWidth -benchmem` (bench1216_test.go). The
+FAT16 volume is the `newfs_msdos` fixture (1 KiB clusters, 293 clusters in the
+file); the FAT32 volume is this package's `Format` (4 KiB clusters, 74 clusters).
+Allocation counts are exact; times were taken at a 1-minute load of about 20
+and are deferred, not published.
+
+| path | FAT16 allocs/op | FAT32 allocs/op | allocs per cluster (16 / 32) |
+|---|---:|---:|---:|
+| `ReadFile` | 924 | 258 | 3.15 / 3.49 |
+| `OpenFile` + `ReadAt` | 327 | 101 | 1.12 / 1.36 |
+
+The totals differ because the file spans four times as many FAT16 clusters;
+per cluster the FAT16 path allocates no more than FAT32.

@@ -38,6 +38,9 @@ const resizeMinDataClusters = 16
 // on the comparison between newSize and the current on-disk size. Returns
 // nil when newSize already matches the current size.
 func (fs *fat32FS) Resize(newSize int64) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	cur, err := fs.currentSize()
 	if err != nil {
 		return err
@@ -67,6 +70,9 @@ func (fs *fat32FS) Resize(newSize int64) error {
 // primary and backup boot sectors, and the FSInfo free-count is refreshed
 // by walking the FAT.
 func (fs *fat32FS) Grow(newSizeBytes int64) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	if fs.partOffset != 0 {
 		return fmt.Errorf("fat32: Grow: refusing to resize filesystem inside a partition (offset %d); resize the partition first", fs.partOffset)
 	}
@@ -173,6 +179,9 @@ func (fs *fat32FS) Grow(newSizeBytes int64) error {
 // to a smaller size would require shifting the data region backward, which
 // adds risk without a corresponding payoff.
 func (fs *fat32FS) Shrink(newSizeBytes int64) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	if fs.partOffset != 0 {
 		return fmt.Errorf("fat32: Shrink: refusing to resize filesystem inside a partition (offset %d); resize the partition first", fs.partOffset)
 	}

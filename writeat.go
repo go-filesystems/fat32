@@ -68,6 +68,9 @@ func (f *fat32File) WriteAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("fat32: WriteAt: negative offset %d", off)
 	}
+	if err := f.fs.checkWritable(); err != nil {
+		return 0, err
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -121,6 +124,9 @@ func (f *fat32File) WriteAt(p []byte, off int64) (int, error) {
 func (f *fat32File) Truncate(size int64) error {
 	if f.closed.Load() {
 		return os.ErrClosed
+	}
+	if err := f.fs.checkWritable(); err != nil {
+		return err
 	}
 	if size < 0 {
 		return fmt.Errorf("fat32: Truncate: negative size %d", size)

@@ -62,8 +62,18 @@ type rootDirEntry struct {
 	size    uint32
 }
 
-// Info holds the fields decoded from the FAT32 BIOS parameter block.
+// Info holds the fields decoded from the FAT BIOS parameter block. Despite the
+// package name it describes FAT12, FAT16 and FAT32 volumes (see Type).
 type Info struct {
+	// Type is the FAT variant, decided by the data-cluster count (see FATType).
+	Type FATType
+	// RootEntries is BPB_RootEntCnt: the capacity of the fixed FAT12/16 root
+	// directory, 0 on FAT32.
+	RootEntries uint16
+	// DataClusters is the number of data clusters of a FAT12/16 volume (0 on
+	// FAT32, where the older TotalSectors-based bound is used).
+	DataClusters uint32
+
 	OEMName           string
 	BytesPerSector    uint16
 	SectorsPerCluster uint8
@@ -94,11 +104,15 @@ func (info Info) FATOffset(partOffset int64) int64 {
 // DataOffset returns the absolute byte offset of the first data cluster.
 func (info Info) DataOffset(partOffset int64) int64 {
 	return partOffset +
-		(int64(info.ReservedSectors)+int64(info.FATCount)*int64(info.FATSize))*int64(info.BytesPerSector)
+		(int64(info.ReservedSectors)+int64(info.FATCount)*int64(info.FATSize)+int64(info.RootDirSectors()))*int64(info.BytesPerSector)
 }
 
-// RootDirOffset returns the absolute byte offset of the root directory cluster.
+// RootDirOffset returns the absolute byte offset of the root directory: its
+// cluster on FAT32, the fixed region after the FATs on FAT12/16.
 func (info Info) RootDirOffset(partOffset int64) int64 {
+	if info.fixedRoot() {
+		return info.rootRegionOffset(partOffset)
+	}
 	return info.DataOffset(partOffset) + int64(info.RootCluster-2)*int64(info.ClusterSize())
 }
 
@@ -185,7 +199,7 @@ func (fs *fat32FS) Stat(path string) (filesystem.Stat, error) {
 func (fs *fat32FS) ListDir(path string) ([]filesystem.DirEntry, error) {
 	var dirCluster uint32
 	if path == "/" {
-		dirCluster = fs.info.RootCluster
+		dirCluster = fs.rootDir()
 	} else {
 		entry, _, err := fs.resolvePath(path)
 		if err != nil {
@@ -220,6 +234,9 @@ func (fs *fat32FS) ReadFile(path string) ([]byte, error) {
 
 // WriteFile creates or overwrites the regular file at path with data and permission bits.
 func (fs *fat32FS) WriteFile(path string, data []byte, perm os.FileMode) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	name, parentCluster, err := fs.getParentDir(path)
 	if err != nil {
 		return err
@@ -276,6 +293,9 @@ func (fs *fat32FS) ReadLink(path string) (string, error) {
 
 // MkDir creates a new empty directory at path.
 func (fs *fat32FS) MkDir(path string, perm os.FileMode) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	name, parentCluster, err := fs.getParentDir(path)
 	if err != nil {
 		return err
@@ -333,6 +353,9 @@ func (fs *fat32FS) MkDir(path string, perm os.FileMode) error {
 
 // DeleteFile removes the regular file at path, freeing its cluster chain.
 func (fs *fat32FS) DeleteFile(path string) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	name, parentCluster, err := fs.getParentDir(path)
 	if err != nil {
 		return err
@@ -367,6 +390,9 @@ func (fs *fat32FS) DeleteFile(path string) error {
 
 // DeleteDir removes the directory at path, recursively deleting any contents.
 func (fs *fat32FS) DeleteDir(path string) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	name, parentCluster, err := fs.getParentDir(path)
 	if err != nil {
 		return err
@@ -405,6 +431,9 @@ func (fs *fat32FS) DeleteDir(path string) error {
 // Rename moves the entry at oldPath to newPath.
 // If newPath already exists it is replaced.
 func (fs *fat32FS) Rename(oldPath, newPath string) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	oldName, oldParentCluster, err := fs.getParentDir(oldPath)
 	if err != nil {
 		return err
@@ -514,6 +543,9 @@ func (fs *fat32FS) Rename(oldPath, newPath string) error {
 // chain. In both cases the 8.3 directory entry's FileSize (and, when the file
 // transitions to or from zero length, its first-cluster fields) is updated.
 func (fs *fat32FS) Truncate(path string, newSize int64) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	if newSize < 0 {
 		return fmt.Errorf("fat32: negative truncate size %d", newSize)
 	}
@@ -784,9 +816,6 @@ func readInfo(r io.ReaderAt, partOffset int64) (Info, error) {
 		return Info{}, fmt.Errorf("fat32: FAT count is zero")
 	}
 	rootEntries := le.Uint16(buf[17:])
-	if rootEntries != 0 {
-		return Info{}, fmt.Errorf("fat32: root entry count %d indicates FAT12/16", rootEntries)
-	}
 
 	totalSectors := uint32(le.Uint16(buf[19:]))
 	if totalSectors == 0 {
@@ -797,9 +826,16 @@ func readInfo(r io.ReaderAt, partOffset int64) (Info, error) {
 	}
 
 	fatSize := uint32(le.Uint16(buf[22:]))
-	if fatSize == 0 {
-		fatSize = le.Uint32(buf[36:])
+	if fatSize != 0 {
+		// BPB_FATSz16 != 0: the FAT12/16 layout (extended boot record at 36).
+		return readInfoFAT1216(buf, bytesPerSector, sectorsPerCluster, reservedSectors, fatCount, rootEntries, totalSectors, fatSize)
 	}
+	// BPB_FATSz16 == 0: the FAT32 layout, recognised by structure as Linux
+	// does; it has no fixed root directory.
+	if rootEntries != 0 {
+		return Info{}, fmt.Errorf("fat32: root entry count %d in a FAT32-layout boot sector", rootEntries)
+	}
+	fatSize = le.Uint32(buf[36:])
 	if fatSize == 0 {
 		return Info{}, fmt.Errorf("fat32: FAT size is zero")
 	}
@@ -815,6 +851,7 @@ func readInfo(r io.ReaderAt, partOffset int64) (Info, error) {
 	}
 
 	return Info{
+		Type:              FAT32,
 		OEMName:           trimASCII(buf[3:11]),
 		BytesPerSector:    bytesPerSector,
 		SectorsPerCluster: sectorsPerCluster,
@@ -934,6 +971,9 @@ func readBacked(r io.ReaderAt, off, n int64) ([]byte, error) {
 
 // readDirBuf reads the full cluster chain of the directory at startCluster.
 func (fs *fat32FS) readDirBuf(startCluster uint32) ([]byte, error) {
+	if startCluster == fixedRootDir {
+		return fs.readFixedRoot()
+	}
 	return fs.readClusterChain(startCluster, fs.dirByteCap())
 }
 
@@ -1347,7 +1387,7 @@ func (fs *fat32FS) resolvePath(path string) (rootDirEntry, uint32, error) {
 		return rootDirEntry{}, 0, fmt.Errorf("fat32: unsupported path %q", path)
 	}
 	components := pathComponents(path)
-	parentCluster := fs.info.RootCluster
+	parentCluster := fs.rootDir()
 	var entry rootDirEntry
 	for i, name := range components {
 		buf, err := fs.readDirBuf(parentCluster)
@@ -1379,9 +1419,9 @@ func (fs *fat32FS) getParentDir(path string) (name string, parentCluster uint32,
 	}
 	components := pathComponents(path)
 	if len(components) == 0 {
-		return "", fs.info.RootCluster, nil
+		return "", fs.rootDir(), nil
 	}
-	parentCluster = fs.info.RootCluster
+	parentCluster = fs.rootDir()
 	for i := 0; i < len(components)-1; i++ {
 		buf, err := fs.readDirBuf(parentCluster)
 		if err != nil {
@@ -1554,6 +1594,9 @@ func trimASCII(raw []byte) string {
 // the BPB geometry (already validated by readInfo: SectorsPerCluster is a
 // non-zero power of two), so the division cannot trap.
 func (fs *fat32FS) clusterCount() int64 {
+	if fs.info.fixedRoot() {
+		return int64(fs.info.DataClusters)
+	}
 	return int64(fs.info.TotalSectors) / int64(fs.info.SectorsPerCluster)
 }
 
@@ -1585,7 +1628,6 @@ func (fs *fat32FS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 		return []byte{}, nil
 	}
 	clusterSize := int64(fs.info.ClusterSize())
-	fatBase := fs.info.FATOffset(fs.partOffset)
 	dataBase := fs.info.DataOffset(fs.partOffset)
 
 	// Cap the requested size at the volume's real data capacity so a forged
@@ -1603,7 +1645,7 @@ func (fs *fat32FS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 	var visited safeio.VisitSet
 	cluster := start
 	for {
-		if cluster < 2 || cluster >= 0x0FFFFFF7 {
+		if cluster < 2 || cluster >= fs.badCluster() {
 			break
 		}
 		if uint64(len(buf)) >= size {
@@ -1621,12 +1663,11 @@ func (fs *fat32FS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 			return nil, fmt.Errorf("fat32: read cluster %d: %w", cluster, err)
 		}
 		buf = append(buf, clusterBuf...)
-		var nextEntry [4]byte
-		if _, err := fs.f.ReadAt(nextEntry[:], fatBase+int64(cluster)*4); err != nil {
+		next, err := fs.fatEntry(cluster)
+		if err != nil {
 			return nil, fmt.Errorf("fat32: read FAT entry for cluster %d: %w", cluster, err)
 		}
-		next := binary.LittleEndian.Uint32(nextEntry[:]) & 0x0FFFFFFF
-		if next >= 0x0FFFFFF8 {
+		if next >= fs.eocCluster() {
 			break
 		}
 		cluster = next
