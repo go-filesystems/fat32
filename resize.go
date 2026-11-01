@@ -340,8 +340,10 @@ func (fs *fat32FS) relocateFATCopies(oldFATSize, newFATSize int64) error {
 	newFATBytes := newFATSize * bytesPerSector
 
 	// Read the entire FAT0 once — it serves as the source for every copy.
-	fat0 := make([]byte, oldFATBytes)
-	if _, err := fs.f.ReadAt(fat0, fat0Base); err != nil {
+	// oldFATBytes is the boot sector's FAT size times the sector size: a claim
+	// of up to terabytes. readBacked proves the last byte exists first.
+	fat0, err := readBacked(fs.f, fat0Base, oldFATBytes)
+	if err != nil {
 		return fmt.Errorf("read FAT0: %w", err)
 	}
 
