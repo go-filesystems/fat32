@@ -26,7 +26,36 @@ Supports bare filesystem images and MBR/GPT partitioned disks, full directory tr
 | Truncate | ✅ | `Truncate(path, newSize)` (`filesystem.Truncater`) |
 | Grow / Shrink / Resize | ✅ | `filesystem.Resizer` — `Resize` dispatches to `Grow` or `Shrink` |
 | Partitioned images | ✅ | MBR/GPT supported |
+| FAT12 / FAT16 (read) | ✅ | `Open` / `OpenReader` read what `newfs_msdos -F 12\|16` and `mkfs.vfat` make below ~33 MiB, including `OpenFile` + `ReadAt`; see [FAT12 and FAT16](#fat12-and-fat16) |
+| FAT12 / FAT16 (write) | ⚠️ No | every mutation (`WriteFile`, `MkDir`, `Delete*`, `Rename`, `Truncate`, `SetLabel`, `Resize`, `File.WriteAt`) returns `ErrReadOnlyFAT` |
 | fsck-clean images | ✅ | `fsck_msdos -n` (macOS) and `fsck.vfat -n` (dosfstools) exit 0 on what the driver writes: `..` of a directory under the root holds cluster 0, and the FSInfo free count and next-free hint are exact at format and kept current (written after each directory write and on `Close`; counted once per open, never per allocation, and never trusted from the image) |
+
+## FAT12 and FAT16
+
+One driver reads all three variants (`Info.Type` is `FAT12`, `FAT16` or
+`FAT32`). The rules, from Microsoft's FAT specification (fatgen103) and checked
+against Linux `fs/fat/inode.c`:
+
+- a boot sector with `BPB_FATSz16 == 0` has the FAT32 layout (Linux does the
+  same); otherwise the variant is decided by the **count of data clusters**
+  alone, never by the `FAT12`/`FAT16` label: below 4085 is FAT12, below 65525
+  is FAT16, and a FAT12/16 layout claiming more is refused;
+- the root directory of FAT12/16 is a fixed region of `BPB_RootEntCnt` entries
+  right after the FATs, not a cluster chain (`Info.RootCluster` is 0,
+  `Info.RootDirOffset` is the region); `..` of a first-level directory holds
+  cluster 0;
+- FAT12 entries are 12 bits packed (`offset = N + N/2`, odd `N` the high 12
+  bits), and one may straddle a sector boundary; end of chain is `>= 0xFF8` /
+  `>= 0xFFF8`, bad cluster `0xFF7` / `0xFFF7`;
+- all geometry is computed in 64 bits and checked against the volume, so a
+  forged `BytsPerSec`, `NumFATs`, `RootEntCnt` or sector count is an error on
+  a 32-bit host too.
+
+**FAT12/16 volumes are read-only in this release**: writing returns
+`ErrReadOnlyFAT` and leaves the image untouched. Write support is tracked as a
+follow-up. The test images in `testdata/` were formatted by `newfs_msdos` and
+populated by mtools (`testdata/mkfixtures`), and `FuzzOpenFAT1216` drives the
+read surface.
 
 ## Untrusted input
 

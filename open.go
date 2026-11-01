@@ -1,7 +1,6 @@
 package filesystem_fat32
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -107,7 +106,6 @@ func (fs *fat32FS) chainClusters(start uint32, size uint64) ([]uint32, int64, er
 		return nil, 0, nil
 	}
 	clusterSize := int64(fs.info.ClusterSize())
-	fatBase := fs.info.FATOffset(fs.partOffset)
 
 	maxBytes := fs.clusterCount() * clusterSize
 	if size > uint64(maxBytes) {
@@ -120,7 +118,7 @@ func (fs *fat32FS) chainClusters(start uint32, size uint64) ([]uint32, int64, er
 	var visited safeio.VisitSet
 	cluster := start
 	for {
-		if cluster < 2 || cluster >= 0x0FFFFFF7 {
+		if cluster < 2 || cluster >= fs.badCluster() {
 			break
 		}
 		if uint64(covered) >= size {
@@ -134,12 +132,11 @@ func (fs *fat32FS) chainClusters(start uint32, size uint64) ([]uint32, int64, er
 		}
 		clusters = append(clusters, cluster)
 		covered += clusterSize
-		var nextEntry [4]byte
-		if _, err := fs.f.ReadAt(nextEntry[:], fatBase+int64(cluster)*4); err != nil {
+		next, err := fs.fatEntry(cluster)
+		if err != nil {
 			return nil, 0, fmt.Errorf("fat32: read FAT entry for cluster %d: %w", cluster, err)
 		}
-		next := binary.LittleEndian.Uint32(nextEntry[:]) & 0x0FFFFFFF
-		if next >= 0x0FFFFFF8 {
+		if next >= fs.eocCluster() {
 			break
 		}
 		cluster = next

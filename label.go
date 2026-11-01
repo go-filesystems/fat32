@@ -37,6 +37,9 @@ func (fs *fat32FS) Label() string {
 // The in-memory Info is refreshed so subsequent Label() calls observe
 // the new value without a reopen.
 func (fs *fat32FS) SetLabel(label string) error {
+	if err := fs.checkWritable(); err != nil {
+		return err
+	}
 	b := []byte(label)
 	if len(b) > MaxLabelLen {
 		return fmt.Errorf("fat32: label %q is %d bytes, exceeds maximum %d", label, len(b), MaxLabelLen)

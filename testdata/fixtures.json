@@ -1,0 +1,636 @@
+[
+  {
+    "image": "fat12.img.gz",
+    "type": 12,
+    "root_entries": 32,
+    "root_full": true,
+    "files": [
+      {
+        "path": "/HELLO.TXT",
+        "size": 10,
+        "sha256": "45426622c0f1e9b33b42f4e752724063957af5b4bca7c41a12c74e3863846585"
+      },
+      {
+        "path": "/A long file name.txt",
+        "size": 3000,
+        "sha256": "340e01f19cf0ede35fd7965594af246b772745cbdd5ecb70c62a7ce98c4d7d2f"
+      },
+      {
+        "path": "/BIG.BIN",
+        "size": 205000,
+        "sha256": "f8e025d6cb3ab5dc96170e8adc4872c4e7a1f85bf47e0a161296f21dddb2e221"
+      },
+      {
+        "path": "/DIR1/DIR2/NESTED.TXT",
+        "size": 700,
+        "sha256": "6928d040ca93892a71189c598bc7ec7438e0a50170dea7b91de169e20d4ee567"
+      },
+      {
+        "path": "/DIR1/inner long name.txt",
+        "size": 100,
+        "sha256": "09b0ed37ae7102cd359a60a66b27dfedfb11cf1660e2acdcabc2e4b5dc4345ea"
+      },
+      {
+        "path": "/MANY/G000.TXT",
+        "size": 5,
+        "sha256": "cec683eb36154f6d47c9c007d7ce9de10e97bcbef9a01997916320d2306b9757"
+      },
+      {
+        "path": "/MANY/G001.TXT",
+        "size": 5,
+        "sha256": "ed76ce5618503650f767ac95f9ff56179cce4142e132aa9539cbdd26dc60d5ea"
+      },
+      {
+        "path": "/MANY/G002.TXT",
+        "size": 5,
+        "sha256": "914ae724f866908d681ef87df07478fc0cb48fc0b39719c4de1416c1459887ab"
+      },
+      {
+        "path": "/MANY/G003.TXT",
+        "size": 5,
+        "sha256": "f93d2759840f019e9804ba0d79056289be01f21d1028a56931d582b3c8c42bf3"
+      },
+      {
+        "path": "/MANY/G004.TXT",
+        "size": 5,
+        "sha256": "eea175002de38af250ca4141f27f47f4fb5a9530781b3b623410dfbd07ed4350"
+      },
+      {
+        "path": "/MANY/G005.TXT",
+        "size": 5,
+        "sha256": "0ef0fce52fbd936ebc6500122b9f9b1aceea117ea3a8eecf75df3c6255525fee"
+      },
+      {
+        "path": "/MANY/G006.TXT",
+        "size": 5,
+        "sha256": "16458b9702f7d88102fd1918453d12ca558c88c650a46a5edc6967a889a417d1"
+      },
+      {
+        "path": "/MANY/G007.TXT",
+        "size": 5,
+        "sha256": "a5abee5092f41dd086266bbbe2f2ec1193aeed231c7f2577e74fd989073ce629"
+      },
+      {
+        "path": "/MANY/G008.TXT",
+        "size": 5,
+        "sha256": "307860abe7a15be0ad8965e98548a684cdb62fba0966658102be3a2e7845a137"
+      },
+      {
+        "path": "/MANY/G009.TXT",
+        "size": 5,
+        "sha256": "5aa28fa007de82f3143bdaaed93fceeac1adf60fbaa8f521e1dcac2b183755e9"
+      },
+      {
+        "path": "/MANY/G010.TXT",
+        "size": 5,
+        "sha256": "b28963bf441f053419c33df0176e8e806f0e122bf946cbc60769b1eb2906ecc6"
+      },
+      {
+        "path": "/MANY/G011.TXT",
+        "size": 5,
+        "sha256": "ca8097dbbe06e660f89324bbb6d4d61f76edbe86e999716a3fafea39aea06436"
+      },
+      {
+        "path": "/MANY/G012.TXT",
+        "size": 5,
+        "sha256": "ff5d3b31428ea88aca73a7d45a2d177ce79ae670a28c5eb8e05d6df2a119074a"
+      },
+      {
+        "path": "/MANY/G013.TXT",
+        "size": 5,
+        "sha256": "437f8f8d4f0710e22d540d5887d02802614bb75cd38df7e8baad0f618afd0504"
+      },
+      {
+        "path": "/MANY/G014.TXT",
+        "size": 5,
+        "sha256": "da918b4f31c7d271bae5d611e0ff51af522a3c1ee19b49d2ab0ba87f25954dda"
+      },
+      {
+        "path": "/MANY/G015.TXT",
+        "size": 5,
+        "sha256": "20f65b578e88f3c56998d60baad770ba57739346f882e6f10bd9a8c8e0efad1c"
+      },
+      {
+        "path": "/MANY/G016.TXT",
+        "size": 5,
+        "sha256": "c9fd24073b10d76d651c1cc80a9e823735eee35b4544dc4e7d039dfeecbf209f"
+      },
+      {
+        "path": "/MANY/G017.TXT",
+        "size": 5,
+        "sha256": "3a48befa8840a26e314155bcda97de2f61f74e92d91b552b12efcee314fa06cf"
+      },
+      {
+        "path": "/MANY/G018.TXT",
+        "size": 5,
+        "sha256": "7031bfc496ce6ca17ca1151c18799bdc9e42d16d574d26d757dde4a879d06562"
+      },
+      {
+        "path": "/MANY/G019.TXT",
+        "size": 5,
+        "sha256": "20319042a326ac3542bed39675c6089424ef93c987d56c89d20a24cbf8c332a6"
+      },
+      {
+        "path": "/MANY/G020.TXT",
+        "size": 5,
+        "sha256": "9ce4f22494b27f869d560c281a46faef2d4a404e3308245b8bdb2b9a1045774a"
+      },
+      {
+        "path": "/MANY/G021.TXT",
+        "size": 5,
+        "sha256": "0423f70cd891ec8fc7f4d1093a8db24c03154907cd7b2f0546248762e895d08d"
+      },
+      {
+        "path": "/MANY/G022.TXT",
+        "size": 5,
+        "sha256": "7dea9f84323ad828b0bfcd77ae051b8341063724f0dfde3957328ee133aab472"
+      },
+      {
+        "path": "/MANY/G023.TXT",
+        "size": 5,
+        "sha256": "be9a094b9fa50fb32242e9aaf7ea5f15e13dc448a5527b017cf74df802cfa99e"
+      },
+      {
+        "path": "/MANY/G024.TXT",
+        "size": 5,
+        "sha256": "25f5f4f5c14aa65dc6fb33626c7a050f15bbc9b34afcaf419c8b12efd1412a67"
+      },
+      {
+        "path": "/MANY/G025.TXT",
+        "size": 5,
+        "sha256": "c6ec540c24fed3325342c865039903c7bf6895e2c05c29da8713f74e92a8ad6f"
+      },
+      {
+        "path": "/MANY/G026.TXT",
+        "size": 5,
+        "sha256": "675218e1b1ba06f2c09793536c01562a47822767b10ae5967ba37401f55df5f1"
+      },
+      {
+        "path": "/MANY/G027.TXT",
+        "size": 5,
+        "sha256": "376d25b8722c0691306fe1c0e42e9b37d704af122d8872154f8f8c5e4ee97c34"
+      },
+      {
+        "path": "/MANY/G028.TXT",
+        "size": 5,
+        "sha256": "3812dcca12a5abcf05493d0ca76e206d0d73db70b8c2aa9fa588189591850d78"
+      },
+      {
+        "path": "/MANY/G029.TXT",
+        "size": 5,
+        "sha256": "7fb2f25ac017871acde1287babd7f5e7d289ad42302f92b7f0de0304f4637582"
+      },
+      {
+        "path": "/MANY/G030.TXT",
+        "size": 5,
+        "sha256": "7dfd5026774a555da14eeefc595ebdf732e2eb4cac54a2d56d8abd83368a552f"
+      },
+      {
+        "path": "/MANY/G031.TXT",
+        "size": 5,
+        "sha256": "2e29adb8f253de4c5b1e8e667318b55aee509a5db538266ce9e03812d0d8e090"
+      },
+      {
+        "path": "/MANY/G032.TXT",
+        "size": 5,
+        "sha256": "100de34e43f6c60634e7c81fcb7aebaf1dca565c2feec41f5785c076fb9b87cd"
+      },
+      {
+        "path": "/MANY/G033.TXT",
+        "size": 5,
+        "sha256": "0d479337eb06f2d442352bbf487daa9562be2ba6d6736887a6c381180ac7977b"
+      },
+      {
+        "path": "/MANY/G034.TXT",
+        "size": 5,
+        "sha256": "55d024cbe6185fe2a17dff356716dd29d50bed088256319e6ef6ef42e400f5a0"
+      },
+      {
+        "path": "/MANY/G035.TXT",
+        "size": 5,
+        "sha256": "7103c953d62185a2512eb266f7cafc712e09b60ca0c1a376138a3d86f116a4d8"
+      },
+      {
+        "path": "/MANY/G036.TXT",
+        "size": 5,
+        "sha256": "052c3517c39c286f5fe61a3a51e4ec3ef11728adcf2027d0bd87a699526b2871"
+      },
+      {
+        "path": "/MANY/G037.TXT",
+        "size": 5,
+        "sha256": "a1ef17b295bbd9d8b10e41b17398ab1910aa792dfd0dbcf8bd77e32bfd765731"
+      },
+      {
+        "path": "/MANY/G038.TXT",
+        "size": 5,
+        "sha256": "a382354f2beea9281149a522710a17a7c13273f01b55fd115026c912978a86eb"
+      },
+      {
+        "path": "/MANY/G039.TXT",
+        "size": 5,
+        "sha256": "f6cdccc13ec8fb05786d6affad3358657145f3b027f22f11169f147bebcbe155"
+      },
+      {
+        "path": "/F000.TXT",
+        "size": 3,
+        "sha256": "25d4f3a6c01b1aa22f4d9952e56e4db8a71ded1b5b488884de31bb430f362010"
+      },
+      {
+        "path": "/F001.TXT",
+        "size": 3,
+        "sha256": "b6605881358d4aca96db9d13007ec608a0c6d81540979166c1d7d964388150f4"
+      },
+      {
+        "path": "/F002.TXT",
+        "size": 3,
+        "sha256": "ff24ed3a92ddeb418c0b4af65b2c64f2836dde44ee6d0d5b5d48afe09652bebc"
+      },
+      {
+        "path": "/F003.TXT",
+        "size": 3,
+        "sha256": "697d77398042b3ee6624640b68c1178bc077984be64ef13a731de45eed7843d6"
+      },
+      {
+        "path": "/F004.TXT",
+        "size": 3,
+        "sha256": "395f14108fd639e06e87d427b2fe17371e14394c7c931010893d266d0440bc1c"
+      },
+      {
+        "path": "/F005.TXT",
+        "size": 3,
+        "sha256": "dd7483b7ff6eedddf628476d704ad536a68609153530c4c6db9cb2f4e4702d83"
+      },
+      {
+        "path": "/F006.TXT",
+        "size": 3,
+        "sha256": "e3ef0259a5c50b2adafd1f03072b5860983bb45683129311690154cb18f75d40"
+      },
+      {
+        "path": "/F007.TXT",
+        "size": 3,
+        "sha256": "9875d0bd3470464d643ac9d77744ac22cca1b2c41a8ec93bac70b07f0841d949"
+      },
+      {
+        "path": "/F008.TXT",
+        "size": 3,
+        "sha256": "83ed7b2991f666911c6bdea60fbd63f63a70ab8ce1711c128051e0fc93b92cad"
+      },
+      {
+        "path": "/F009.TXT",
+        "size": 3,
+        "sha256": "9b3dae6217cbe51754d25809c7c46c19a8cbe63b9a85854ec00e8a9aa4d32e06"
+      },
+      {
+        "path": "/F010.TXT",
+        "size": 3,
+        "sha256": "fdc0453a75507c0618c1baaccd01152b374fd1299789f137acb4687ea4b3f362"
+      },
+      {
+        "path": "/F011.TXT",
+        "size": 3,
+        "sha256": "411409c3b3c9d944b6bdaa11166aafef497156556c78a693ee8fa19a42463543"
+      },
+      {
+        "path": "/F012.TXT",
+        "size": 3,
+        "sha256": "543b67747bc69a9d8abee026dec1a45f17708d87bac8942680828e8561e9fe03"
+      },
+      {
+        "path": "/F013.TXT",
+        "size": 3,
+        "sha256": "5d8e90b21c81daef9ede664ad4bdeb44ee280be8456d4f752b432a5e41ee40df"
+      },
+      {
+        "path": "/F014.TXT",
+        "size": 3,
+        "sha256": "f794e77438196900a8c1958b62fd6bff91f9028cfb17aaafe18ea14165b9c7b6"
+      },
+      {
+        "path": "/F015.TXT",
+        "size": 3,
+        "sha256": "0a5fb82593f50109952fbd660514c567bafc4922c19a0e31d17d055e121c35f4"
+      },
+      {
+        "path": "/F016.TXT",
+        "size": 3,
+        "sha256": "21f67862a06f21793f890c1495243277e611106ed8c91b9ee13e5bb498c11bc4"
+      },
+      {
+        "path": "/F017.TXT",
+        "size": 3,
+        "sha256": "54de1a2d392b5e2c3533e8371ff64f0c19e9746046b91c992740673091ed3960"
+      },
+      {
+        "path": "/F018.TXT",
+        "size": 3,
+        "sha256": "e7f4a0b606fb180d7b9a5a7fa3b871080122959b66136bca515d6b401d2ab74b"
+      },
+      {
+        "path": "/F019.TXT",
+        "size": 3,
+        "sha256": "13f8d3781ee630f519a8b05fde9eb2b60e1a68105d0d39841b5e0deee5f86199"
+      },
+      {
+        "path": "/F020.TXT",
+        "size": 3,
+        "sha256": "548015e85e688ad17da4deb7eb41755b4e77d2dcc66812503273470ca24e6fb5"
+      },
+      {
+        "path": "/F021.TXT",
+        "size": 3,
+        "sha256": "ad8fa2426bd46fec94f556648a130165ba9afbb07d08fc03cca3e1308b41e875"
+      },
+      {
+        "path": "/F022.TXT",
+        "size": 3,
+        "sha256": "682f1942917002df3cb7d277bec10505786384940a3980614ac69a0da7f155e7"
+      },
+      {
+        "path": "/F023.TXT",
+        "size": 3,
+        "sha256": "8491a1ce503db4ec07bb241a4e2ff808cb9da16f8ddc481d3e2e28d055bca9cb"
+      }
+    ],
+    "dirs": [
+      "/DIR1",
+      "/DIR1/DIR2",
+      "/MANY"
+    ],
+    "root": [
+      "HELLO.TXT",
+      "A long file name.txt",
+      "BIG.BIN",
+      "DIR1",
+      "MANY",
+      "F000.TXT",
+      "F001.TXT",
+      "F002.TXT",
+      "F003.TXT",
+      "F004.TXT",
+      "F005.TXT",
+      "F006.TXT",
+      "F007.TXT",
+      "F008.TXT",
+      "F009.TXT",
+      "F010.TXT",
+      "F011.TXT",
+      "F012.TXT",
+      "F013.TXT",
+      "F014.TXT",
+      "F015.TXT",
+      "F016.TXT",
+      "F017.TXT",
+      "F018.TXT",
+      "F019.TXT",
+      "F020.TXT",
+      "F021.TXT",
+      "F022.TXT",
+      "F023.TXT"
+    ]
+  },
+  {
+    "image": "fat16.img.gz",
+    "type": 16,
+    "root_entries": 512,
+    "root_full": false,
+    "files": [
+      {
+        "path": "/HELLO.TXT",
+        "size": 10,
+        "sha256": "9457ea28fffacde2d6f0136a8c078ccf550a0c7c991f7ffe1b232223d57350e2"
+      },
+      {
+        "path": "/A long file name.txt",
+        "size": 3000,
+        "sha256": "7f504bfee3ef673c646156a28b838912441a495cfcdf8f9b5995dd32f8548eec"
+      },
+      {
+        "path": "/BIG.BIN",
+        "size": 300000,
+        "sha256": "b7130283a3b3a0ddf7e0043594c63d88f86ec4c3372a3df9e2471f6cd679b6ee"
+      },
+      {
+        "path": "/DIR1/DIR2/NESTED.TXT",
+        "size": 700,
+        "sha256": "5ab5e915cb420106d093e23917ad2ec867c80cdd2d36b40064b4ba9d69e939c3"
+      },
+      {
+        "path": "/DIR1/inner long name.txt",
+        "size": 100,
+        "sha256": "f454be91434bf6860adf35e3ee09c00d597b5062d2543e7edc85e06886822f3b"
+      },
+      {
+        "path": "/MANY/G000.TXT",
+        "size": 5,
+        "sha256": "0402272b56d0e359c1314c395ea6c4f0df469d6fe71d46d85415220b921fe62a"
+      },
+      {
+        "path": "/MANY/G001.TXT",
+        "size": 5,
+        "sha256": "f2b839293dc4cec14c89c8f97396796a639c20f0d6128b0cd63942e97378ec57"
+      },
+      {
+        "path": "/MANY/G002.TXT",
+        "size": 5,
+        "sha256": "a53df997a9bea3d7a20f7a344c160701ec619fefc844961bf8585c35da947796"
+      },
+      {
+        "path": "/MANY/G003.TXT",
+        "size": 5,
+        "sha256": "83f2fc06d8fa956cc5c0b9bedb0c13cb25947eb12901045c81045d9824697cfd"
+      },
+      {
+        "path": "/MANY/G004.TXT",
+        "size": 5,
+        "sha256": "13af63222df136e13df8d44ff3120c48d2e029cfc9bdef537b22666728212980"
+      },
+      {
+        "path": "/MANY/G005.TXT",
+        "size": 5,
+        "sha256": "f52c2928dbd21f621279624bd6d89741a802a2bd68e7946454e9bde75fff4978"
+      },
+      {
+        "path": "/MANY/G006.TXT",
+        "size": 5,
+        "sha256": "8ccf32b00513c2115c948c0f1ef06628896c20b2bb57e61f35feb701ab699560"
+      },
+      {
+        "path": "/MANY/G007.TXT",
+        "size": 5,
+        "sha256": "7ccb0c356ecef27736599aaa4ae71700c6b5fa8e6dff504e752e1ddc28d9833c"
+      },
+      {
+        "path": "/MANY/G008.TXT",
+        "size": 5,
+        "sha256": "9290d0e2e88b77ae4542392110a780cc814b0aefb7880cb602b04ad895a1ea74"
+      },
+      {
+        "path": "/MANY/G009.TXT",
+        "size": 5,
+        "sha256": "d27ad0bd25beb0fdfb65b0fee673a839d7d32269df0c790bebfdcf956500c29d"
+      },
+      {
+        "path": "/MANY/G010.TXT",
+        "size": 5,
+        "sha256": "2cba53e62e9eb8e5b1b050e2c082d8ed28319da82be6c6786cfac6f994a18a89"
+      },
+      {
+        "path": "/MANY/G011.TXT",
+        "size": 5,
+        "sha256": "04e37298eb0b7283823646a5a357102e3b5ba01505e6c6f9c25f8405c9aaa84f"
+      },
+      {
+        "path": "/MANY/G012.TXT",
+        "size": 5,
+        "sha256": "cbb2bd16568687ca7f28fdb7958d5de6d43a56749b38d70f7a7c26a25b152fd7"
+      },
+      {
+        "path": "/MANY/G013.TXT",
+        "size": 5,
+        "sha256": "f739ed648ada2c6c5d8ceec6a47d4906ef44e12deaca09d2ed908b2d7bf4779d"
+      },
+      {
+        "path": "/MANY/G014.TXT",
+        "size": 5,
+        "sha256": "6c06ed0ec0bc83b91821e36b42c43a15c1eaa32492bd84b7ebb2b0f8552d6f4f"
+      },
+      {
+        "path": "/MANY/G015.TXT",
+        "size": 5,
+        "sha256": "6333ff71745e5d76c22f20296131fadcdc429259f88288c65d6402ce5dbd1cf3"
+      },
+      {
+        "path": "/MANY/G016.TXT",
+        "size": 5,
+        "sha256": "66354b8ea9298b072ee4b50bb61bf3b0c298a91ea8e23a8f5ada6ab5c88bf34b"
+      },
+      {
+        "path": "/MANY/G017.TXT",
+        "size": 5,
+        "sha256": "201b1716969b2b0f2aac433ed20ad09df9930e24be049a5c314fc30eee34748d"
+      },
+      {
+        "path": "/MANY/G018.TXT",
+        "size": 5,
+        "sha256": "42e1dfb849bece7bd832574081f453d65e77b4f16d02181dff88d1eddd1647b6"
+      },
+      {
+        "path": "/MANY/G019.TXT",
+        "size": 5,
+        "sha256": "ffb8974ba2ae74451b663baace3c1b635beafc0e3a1dddf702ad1b0d064f0119"
+      },
+      {
+        "path": "/MANY/G020.TXT",
+        "size": 5,
+        "sha256": "9e851a7e379be073159e58e1f586b2dd2f625afe57a360aa6fb7be89abcb703f"
+      },
+      {
+        "path": "/MANY/G021.TXT",
+        "size": 5,
+        "sha256": "32c125950d1c40e77e283d78d271f502a12ffe2ec6949b804be30d1d596e07d5"
+      },
+      {
+        "path": "/MANY/G022.TXT",
+        "size": 5,
+        "sha256": "71a68be8b5356b006598e077feb67e50324ee62e59162b2bfd03a65c5032dc58"
+      },
+      {
+        "path": "/MANY/G023.TXT",
+        "size": 5,
+        "sha256": "8f22c572970f9c792593824115f78925ce5ef23e6973ecb0261be17e4f4b2704"
+      },
+      {
+        "path": "/MANY/G024.TXT",
+        "size": 5,
+        "sha256": "c75241ce1fc5ade313948f11fd100aa5801bda8e0968c0458d0eec185167fafe"
+      },
+      {
+        "path": "/MANY/G025.TXT",
+        "size": 5,
+        "sha256": "a1b85b1843d4e83e0524e9f0d2c3bc8a82006b39aea3aca7884f3ffd37a84f9b"
+      },
+      {
+        "path": "/MANY/G026.TXT",
+        "size": 5,
+        "sha256": "85d5df6611c37aae93800f7e3d3009da3ea6f31e19559a92ec386bf93b280d6e"
+      },
+      {
+        "path": "/MANY/G027.TXT",
+        "size": 5,
+        "sha256": "506f264555eb22a2043b1b34e2244be5411b37eff671f8660db1f700bf6f8b7f"
+      },
+      {
+        "path": "/MANY/G028.TXT",
+        "size": 5,
+        "sha256": "5b40fd395331726a2accd011886a4fb93626e065792bd104cbd0148c7e0b256f"
+      },
+      {
+        "path": "/MANY/G029.TXT",
+        "size": 5,
+        "sha256": "2a1d92b14f8dd3885adbc7ccdc81eb4a3ae6fd84b17ae58fbcd8fa63d9a0d7a7"
+      },
+      {
+        "path": "/MANY/G030.TXT",
+        "size": 5,
+        "sha256": "6414be28aa036e9fff18d13881710f85877e9059ecf055616af0e3f34e1f08fe"
+      },
+      {
+        "path": "/MANY/G031.TXT",
+        "size": 5,
+        "sha256": "76fae73a893010adc58a0cdc97d1068579b23aaf9d4a2419239bcde9459744f4"
+      },
+      {
+        "path": "/MANY/G032.TXT",
+        "size": 5,
+        "sha256": "b403859b8fd9729b8e3be993779339e4d2c9d6063404cafe043709d9c8cef756"
+      },
+      {
+        "path": "/MANY/G033.TXT",
+        "size": 5,
+        "sha256": "898643291e0e548bd041bebbda9f1ef7ff0362dc2157021b47a24f2e746d8a36"
+      },
+      {
+        "path": "/MANY/G034.TXT",
+        "size": 5,
+        "sha256": "c4ceeea96815c8d0a99d12f1bab4d2efd5946a50dd60b8721cb2987b3b8ef306"
+      },
+      {
+        "path": "/MANY/G035.TXT",
+        "size": 5,
+        "sha256": "0769c5e6e73f7559a2c7ba5bfeafd695597766f4520d49af4b1e889ad690efd5"
+      },
+      {
+        "path": "/MANY/G036.TXT",
+        "size": 5,
+        "sha256": "4cce2691c7637f9ccb309ff478960b21d2dde73479b11877e38ff4306b04eb26"
+      },
+      {
+        "path": "/MANY/G037.TXT",
+        "size": 5,
+        "sha256": "8be9d5c6fb69e97057d3416b60001ac40506791e2d571f2f50a349900c809ca1"
+      },
+      {
+        "path": "/MANY/G038.TXT",
+        "size": 5,
+        "sha256": "e4f52dc2e9f65796a9985b38929d689a83e4b4dde0b462760d08cc908d05d15f"
+      },
+      {
+        "path": "/MANY/G039.TXT",
+        "size": 5,
+        "sha256": "900717412042459790d523208d9f44ec0e4fb92efb26edf752d18d1426636c40"
+      }
+    ],
+    "dirs": [
+      "/DIR1",
+      "/DIR1/DIR2",
+      "/MANY"
+    ],
+    "root": [
+      "HELLO.TXT",
+      "A long file name.txt",
+      "BIG.BIN",
+      "DIR1",
+      "MANY"
+    ]
+  }
+]
