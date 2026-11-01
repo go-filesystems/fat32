@@ -28,6 +28,24 @@ Supports bare filesystem images and MBR/GPT partitioned disks, full directory tr
 | Partitioned images | ✅ | MBR/GPT supported |
 | fsck-clean images | ✅ | `fsck_msdos -n` (macOS) and `fsck.vfat -n` (dosfstools) exit 0 on what the driver writes: `..` of a directory under the root holds cluster 0, and the FSInfo free count and next-free hint are exact at format and kept current (written after each directory write and on `Close`; counted once per open, never per allocation, and never trusted from the image) |
 
+## Untrusted input
+
+An image is attacker-controlled data. Every allocation a value in the image can
+size is bounded before it happens, and a hostile image gets an error, not an
+out-of-memory kill:
+
+- a cluster buffer is allocated only after the cluster's last byte has been
+  read, so a small file declaring 512 KiB clusters costs nothing to probe;
+- the logical sector size is 512..4096 (Linux `fat_read_bpb`); the field is a
+  `uint16`, and 32768-byte sectors made every cluster buffer 4 MiB;
+- a directory is at most 65536 entries of 32 bytes, 2 MiB (Linux
+  `FAT_MAX_DIR_SIZE`), however large the cluster;
+- `Resize` reads the first FAT only after proving the whole FAT is in the
+  image (a 128 GiB FAT claim allocated 137 GB before this).
+
+`FuzzOpenAndRead` drives the read surface; the regression tests are in
+`bombs_test.go`.
+
 ## Limitations
 
 - FAT32 has no POSIX symlinks, permissions, or ACLs.

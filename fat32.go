@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	iofs "io/fs"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -744,6 +745,9 @@ func (fs *fat32FS) growChain(firstCluster uint32, oldClusters, newClusters, oldS
 	return firstCluster, nil
 }
 
+// maxBytesPerSector is the largest logical sector a FAT volume can have.
+const maxBytesPerSector = 4096
+
 func readInfo(r io.ReaderAt, partOffset int64) (Info, error) {
 	buf := make([]byte, sectorSize)
 	if _, err := r.ReadAt(buf, partOffset); err != nil {
@@ -755,7 +759,10 @@ func readInfo(r io.ReaderAt, partOffset int64) (Info, error) {
 
 	le := binary.LittleEndian
 	bytesPerSector := le.Uint16(buf[11:])
-	if !isPowerOfTwo(uint32(bytesPerSector)) || bytesPerSector < uint16(sectorSize) {
+	// 512..4096, as Linux fs/fat/inode.c fat_read_bpb: "bogus logical sector
+	// size". The field is a uint16, so without the ceiling 32768-byte sectors
+	// times 128 sectors per cluster make every cluster buffer 4 MiB.
+	if !isPowerOfTwo(uint32(bytesPerSector)) || bytesPerSector < uint16(sectorSize) || bytesPerSector > maxBytesPerSector {
 		return Info{}, fmt.Errorf("fat32: invalid bytes per sector %d", bytesPerSector)
 	}
 	sectorsPerCluster := buf[13]
@@ -880,10 +887,48 @@ func partitionOffset(r io.ReaderAt, deviceSize int64, partIndex int) (int64, err
 // build images millions of cluster-sized entries large.
 var maxDirClusters = 256
 
+// maxDirBytes is the largest a FAT directory can be: 65536 entries of 32 bytes,
+// 2 MiB (Linux include/uapi/linux/msdos_fs.h FAT_MAX_DIR_ENTRIES,
+// FAT_MAX_DIR_SIZE). 256 clusters of a large cluster size is far more.
+const maxDirBytes = 65536 * 32
+
+// dirByteCap is the byte ceiling on one directory buffer: the cluster cap, and
+// never more than a directory can be.
+func (fs *fat32FS) dirByteCap() uint64 {
+	n := uint64(maxDirClusters) * uint64(fs.info.ClusterSize())
+	if n > maxDirBytes {
+		n = maxDirBytes
+	}
+	return n
+}
+
+// readBacked reads n bytes at off, allocating the buffer only after proving
+// that the last of them exists. n is derived from the boot sector (a cluster,
+// a FAT) and make-then-ReadAt reserved it for an image of any size.
+func readBacked(r io.ReaderAt, off, n int64) ([]byte, error) {
+	if n <= 0 {
+		return []byte{}, nil
+	}
+	if off < 0 || off > math.MaxInt64-n {
+		return nil, fmt.Errorf("fat32: %d bytes at offset %d overflow", n, off)
+	}
+	var probe [1]byte
+	if m, err := r.ReadAt(probe[:], off+n-1); m != 1 {
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("fat32: %d bytes at offset %d lie past the end of the image", n, off)
+	}
+	buf := make([]byte, n)
+	if m, err := r.ReadAt(buf, off); err != nil && m != len(buf) {
+		return nil, err
+	}
+	return buf, nil
+}
+
 // readDirBuf reads the full cluster chain of the directory at startCluster.
 func (fs *fat32FS) readDirBuf(startCluster uint32) ([]byte, error) {
-	maxBytes := uint64(maxDirClusters) * uint64(fs.info.ClusterSize())
-	return fs.readClusterChain(startCluster, maxBytes)
+	return fs.readClusterChain(startCluster, fs.dirByteCap())
 }
 
 // writeDirBuf writes buf back to the cluster chain starting at startCluster.
@@ -1087,7 +1132,7 @@ func (fs *fat32FS) ensureDirSlots(buf []byte, n int) ([]byte, int) {
 	// safety cap shared with readDirBuf (256 clusters worth of dir buf
 	// by default; tests may shrink this).
 	for {
-		if len(buf) >= maxDirClusters*clusterSize {
+		if uint64(len(buf)) >= fs.dirByteCap() {
 			return buf, -1
 		}
 		buf = append(buf, make([]byte, clusterSize)...)
@@ -1548,9 +1593,9 @@ func (fs *fat32FS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 		if err := visited.Check(uint64(cluster)); err != nil {
 			return nil, fmt.Errorf("fat32: cluster chain from %d: %w", start, err)
 		}
-		clusterBuf := make([]byte, clusterSize)
 		off := dataBase + int64(cluster-2)*clusterSize
-		if _, err := fs.f.ReadAt(clusterBuf, off); err != nil {
+		clusterBuf, err := readBacked(fs.f, off, clusterSize)
+		if err != nil {
 			return nil, fmt.Errorf("fat32: read cluster %d: %w", cluster, err)
 		}
 		buf = append(buf, clusterBuf...)
