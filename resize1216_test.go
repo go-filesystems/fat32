@@ -198,9 +198,9 @@ func TestFAT1216ResizeRefusesTypeChange(t *testing.T) {
 		count int64
 		want  string
 	}{
-		{12, true, 4085, "growing to 4085 clusters would make this FAT12 volume FAT16; reformat instead"},
-		{16, false, 4084, "shrinking to 4084 clusters would make this FAT16 volume FAT12; reformat instead"},
-		{16, true, 65525, "growing to 65525 clusters would make this FAT16 volume FAT32; reformat instead"},
+		{12, true, 4085, "growing to 4085 clusters would make this FAT12 volume FAT16; copy it into a new image of that size with CopyResized"},
+		{16, false, 4084, "shrinking to 4084 clusters would make this FAT16 volume FAT12; copy it into a new image of that size with CopyResized"},
+		{16, true, 65525, "growing to 65525 clusters would make this FAT16 volume FAT32; copy it into a new image of that size with CopyResized"},
 	}
 	for _, c := range cases {
 		path, fs := f1216Writable(t, c.typ)
