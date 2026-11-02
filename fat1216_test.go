@@ -372,35 +372,6 @@ func (w windowReader) ReadAt(p []byte, off int64) (int, error) {
 	return copy(p, w.b[off:]), nil
 }
 
-// Resizing a FAT12/16 volume is the one mutation not supported: it says so and
-// leaves the image untouched.
-func TestFAT1216ResizeRefused(t *testing.T) {
-	for _, typ := range []int{12, 16} {
-		_, img := f1216Fixture(t, typ)
-		fs, err := OpenReader(&rwBuf{img}, int64(len(img)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		before := append([]byte(nil), img...)
-		checks := map[string]error{
-			"Resize": fs.(interface{ Resize(int64) error }).Resize(int64(len(img)) * 2),
-			"Grow":   fs.(*fat32FS).Grow(int64(len(img)) * 2),
-			"Shrink": fs.(*fat32FS).Shrink(int64(len(img)) / 2),
-		}
-		for name, err := range checks {
-			if !errors.Is(err, ErrResizeFAT) {
-				t.Errorf("FAT%d %s: error = %v, want ErrResizeFAT", typ, name, err)
-			}
-		}
-		if err := fs.Close(); err != nil {
-			t.Errorf("Close: %v", err)
-		}
-		if !bytes.Equal(before, img) {
-			t.Errorf("FAT%d: a refused resize changed the image", typ)
-		}
-	}
-}
-
 type rwBuf struct{ b []byte }
 
 func (r *rwBuf) ReadAt(p []byte, off int64) (int, error) {

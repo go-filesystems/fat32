@@ -38,9 +38,6 @@ const resizeMinDataClusters = 16
 // on the comparison between newSize and the current on-disk size. Returns
 // nil when newSize already matches the current size.
 func (fs *fat32FS) Resize(newSize int64) error {
-	if err := fs.checkResizable(); err != nil {
-		return err
-	}
 	cur, err := fs.currentSize()
 	if err != nil {
 		return err
@@ -70,8 +67,8 @@ func (fs *fat32FS) Resize(newSize int64) error {
 // primary and backup boot sectors, and the FSInfo free-count is refreshed
 // by walking the FAT.
 func (fs *fat32FS) Grow(newSizeBytes int64) error {
-	if err := fs.checkResizable(); err != nil {
-		return err
+	if fs.info.fixedRoot() {
+		return fs.growNarrow(newSizeBytes)
 	}
 	if fs.partOffset != 0 {
 		return fmt.Errorf("fat32: Grow: refusing to resize filesystem inside a partition (offset %d); resize the partition first", fs.partOffset)
@@ -179,8 +176,8 @@ func (fs *fat32FS) Grow(newSizeBytes int64) error {
 // to a smaller size would require shifting the data region backward, which
 // adds risk without a corresponding payoff.
 func (fs *fat32FS) Shrink(newSizeBytes int64) error {
-	if err := fs.checkResizable(); err != nil {
-		return err
+	if fs.info.fixedRoot() {
+		return fs.shrinkNarrow(newSizeBytes)
 	}
 	if fs.partOffset != 0 {
 		return fmt.Errorf("fat32: Shrink: refusing to resize filesystem inside a partition (offset %d); resize the partition first", fs.partOffset)
@@ -442,8 +439,16 @@ func (fs *fat32FS) writeTotalSectors(newTotal uint32) error {
 		if buf[510] != 0x55 || buf[511] != 0xAA {
 			return fmt.Errorf("boot signature missing at %d", off)
 		}
-		binary.LittleEndian.PutUint16(buf[19:21], 0)
-		binary.LittleEndian.PutUint32(buf[32:36], newTotal)
+		if fs.info.fixedRoot() && newTotal <= 0xFFFF {
+			// FAT12/16: BPB_TotSec16 when the count fits it, else
+			// BPB_TotSec32 with BPB_TotSec16 at 0 (fatgen103; Linux reads
+			// TotSec16 first and falls back to TotSec32).
+			binary.LittleEndian.PutUint16(buf[19:21], uint16(newTotal))
+			binary.LittleEndian.PutUint32(buf[32:36], 0)
+		} else {
+			binary.LittleEndian.PutUint16(buf[19:21], 0)
+			binary.LittleEndian.PutUint32(buf[32:36], newTotal)
+		}
 		if _, err := fs.f.WriteAt(buf, off); err != nil {
 			return fmt.Errorf("write boot sector at %d: %w", off, err)
 		}

@@ -770,6 +770,11 @@ func FuzzWriteFAT1216(f *testing.F) {
 	f.Add([]byte{0, 1, 40, 1, 2, 3, 2, 1, 4, 5, 0, 6, 7, 8, 3, 2})
 	f.Add([]byte{1, 0, 0, 0, 0, 3, 1, 2, 4, 1, 9, 5, 2, 7, 6, 0, 1, 1, 7, 3, 0})
 	f.Add(bytes.Repeat([]byte{0, 9, 250}, 40))
+	// Resize (op 7): shrink then grow back, odd length = FAT16, even = FAT12.
+	f.Add([]byte{7, 100, 99, 0, 1, 40, 7, 160, 99, 5, 1, 1})                        // FAT12
+	f.Add([]byte{7, 100, 99, 0, 1, 40, 7, 160, 99, 5, 1, 1, 0})                     // FAT16
+	f.Add([]byte{7, 0, 99, 7, 255, 99, 7, 1, 1, 7, 128, 0, 2, 3, 4, 7, 200, 50})    // FAT12: large moves, refused type changes
+	f.Add([]byte{7, 0, 99, 7, 255, 99, 7, 1, 1, 7, 128, 0, 2, 3, 4, 7, 200, 50, 0}) // FAT16
 	f.Fuzz(func(t *testing.T, ops []byte) {
 		if len(ops) > 300 {
 			ops = ops[:300]
@@ -777,16 +782,22 @@ func FuzzWriteFAT1216(f *testing.F) {
 		typ := 12 + 4*int(len(ops)%2)
 		_, img := f1216Fixture(t, typ)
 		fs := f1216Open(t, img)
-		rw, err := OpenReader(&rwBuf{img}, int64(len(img)))
+		rw, err := OpenReader(&rwTrunc{rwBuf{img}}, int64(len(img)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		fs = rw.(*fat32FS)
+		typeAtStart := fs.info.Type
 		names := []string{"/MANY/A", "/MANY/b long fuzz name", "/DIR1/C.TXT", "/DIR1/DIR2/D", "/E", "/MANY/G001.TXT", "/DIR1/NEWDIR", "/MANY/F"}
 		for i := 0; i+2 < len(ops); i += 3 {
 			a, b := names[int(ops[i+1])%len(names)], names[int(ops[i+2])%len(names)]
 			size := int(ops[i+2]) * 997
-			switch ops[i] % 7 {
+			switch ops[i] % 8 {
+			case 7:
+				// Resize by up to +-12800 sectors; whatever it does, the
+				// type must not change.
+				delta := (int64(ops[i+1]) - 128) * int64(ops[i+2]%100)
+				_ = fs.Resize((int64(fs.info.TotalSectors) + delta) * int64(fs.info.BytesPerSector))
 			case 0:
 				_ = fs.WriteFile(a, pat(size, ops[i]), 0o644)
 			case 1:
@@ -805,6 +816,20 @@ func FuzzWriteFAT1216(f *testing.F) {
 				}
 			}
 		}
+		if fs.info.Type != typeAtStart {
+			t.Fatalf("a resize changed the type from %v to %v", typeAtStart, fs.info.Type)
+		}
 		checkVolume(t, fs)
 	})
+}
+
+// rwTrunc is a growable, truncatable in-memory image: Truncate keeps the
+// leading bytes and zero-fills what it adds, like a file.
+type rwTrunc struct{ rwBuf }
+
+func (r *rwTrunc) Truncate(n int64) error {
+	nb := make([]byte, n) // a fresh array: bytes cut earlier must not come back
+	copy(nb, r.b)
+	r.b = nb
+	return nil
 }
