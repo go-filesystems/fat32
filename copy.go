@@ -406,8 +406,8 @@ func (src *fat32FS) copyTree(dst *fat32FS, dir uint32, dstPath string) error {
 // CopyResized formats the first size bytes of dst as a new FAT volume and copies
 // the whole tree of src into it: names (long ones too), directories, contents,
 // attributes, timestamps and the volume label. It is the resize that FAT12/16
-// refuses in place (ErrResizeFATFull, ErrResizeType): a bigger FAT, or another
-// FAT type, needs a new image.
+// refuses in place (ErrResizeType): another FAT type needs a new image. (A
+// bigger FAT of the same type is grown in place since v0.10.0.)
 //
 // src must be a FAT volume opened by this package; it is only read, so it is
 // unchanged whether CopyResized succeeds or fails. cfg.Type picks the FAT type

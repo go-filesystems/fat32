@@ -129,14 +129,17 @@ func TestFAT1216ShrinkGrow(t *testing.T) {
 				t.Fatalf("size on disk %d, want %d", st.Size(), origSize)
 			}
 
-			// Full FAT: the next cluster would need a bigger FAT.
+			// Full FAT: one more cluster needs a bigger FAT, which Grow now makes.
 			_, capacity := fs.narrowGeometry(int64(fs.info.TotalSectors))
 			if err := fs.Grow(sizeForCount(fs, capacity)); err != nil {
 				t.Fatal(err)
 			}
 			fs = settleResized(t, im, path, fs, fat, capacity)
-			if err := fs.Grow(sizeForCount(fs, capacity+1)); !errors.Is(err, ErrResizeFATFull) || !errors.Is(err, ErrResizeFAT) {
-				t.Fatalf("Grow past the FAT = %v, want ErrResizeFATFull", err)
+			if err := fs.Grow(sizeForCount(fs, capacity+1) + 4*int64(fs.info.BytesPerSector)*int64(fs.info.SectorsPerCluster)); err != nil {
+				t.Fatalf("Grow past the FAT = %v", err)
+			}
+			if fs.info.FATSize == fatSize {
+				t.Fatal("the FAT did not grow")
 			}
 		})
 	}
@@ -198,9 +201,10 @@ func TestFAT1216ResizeRefusesTypeChange(t *testing.T) {
 		count int64
 		want  string
 	}{
-		{12, true, 4085, "growing to 4085 clusters would make this FAT12 volume FAT16; copy it into a new image of that size with CopyResized"},
+		// A grow past a threshold needs a margin: the bigger FAT takes clusters.
+		{12, true, 5100, "would make this FAT12 volume FAT16; copy it into a new image of that size with CopyResized"},
 		{16, false, 4084, "shrinking to 4084 clusters would make this FAT16 volume FAT12; copy it into a new image of that size with CopyResized"},
-		{16, true, 65525, "growing to 65525 clusters would make this FAT16 volume FAT32; copy it into a new image of that size with CopyResized"},
+		{16, true, 66000, "would make this FAT16 volume FAT32; copy it into a new image of that size with CopyResized"},
 	}
 	for _, c := range cases {
 		path, fs := f1216Writable(t, c.typ)

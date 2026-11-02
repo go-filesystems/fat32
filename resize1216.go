@@ -23,10 +23,28 @@ import (
 // The FATs sit before the root directory and the data, so the FAT cannot grow
 // without moving both. The design choice:
 //
-//   - Grow works while the FAT already has room for the new cluster count (the
-//     FAT size, the root and every cluster offset stay where they are). A grow
-//     that needs more FAT sectors is refused with ErrResizeFATFull. A shrink
-//     leaves the FAT at its size, so shrink-then-grow always fits.
+//   - Grow works in place. While the FAT already has room for the new cluster
+//     count nothing moves (the root and every cluster offset stay put). When it
+//     does not, the FAT is made bigger and root + data shift forward by the
+//     delta (see moveNarrowLayout); cluster numbers do not change, so no FAT
+//     entry, directory entry or chain is rewritten. This differs from GNU
+//     parted (libparted/fs/r/fat/resize.c, opened 2026-11-02), which builds a
+//     whole new layout, duplicates clusters into it (fat_duplicate_clusters),
+//     renumbers them, rewrites the FAT and directory tree, and writes the boot
+//     sector last (fat_resize). Parted pads the reserved area
+//     (fat_calc_align_sectors) to keep old and new clusters aligned; the FAT
+//     size comes from the same fixpoint as calc_sizes in calc.c, reproduced by
+//     narrowGrowGeometry. A shrink leaves the FAT at its size.
+//   - Crash window: step 1 (zero dead FAT slack) and step 2 (extend the image)
+//     are invisible to the old volume. Steps 3-5 (move root+data, move FAT
+//     copies, zero FAT tails) overwrite the old layout in place; from the first
+//     of those writes until the boot sector write (step 6, the last write of the
+//     whole grow, one write per boot sector) the volume is NOT consistent: old
+//     BPB over a half-moved layout. Nothing short of a journal or a second copy
+//     of the data closes it. TestFAT1216GrowFailureAtEveryWrite fails every
+//     write in turn, asserts that the old volume is intact (fsck-clean, every
+//     hash) before the window opens and that the window ends at the last write,
+//     and that a completed grow is fsck-clean.
 //   - Shrink refuses while any cluster past the new end is in use (as FAT32's
 //     Shrink does: nothing is relocated).
 //   - A resize that moves the cluster count across 4085 or 65525 changes the
@@ -122,9 +140,6 @@ func (fs *fat32FS) growNarrow(newSize int64) error {
 		return err
 	}
 	oldFAT := int64(fs.info.FATSize)
-	if newFAT > 0xFFFF {
-		return fmt.Errorf("fat32: Grow: %d clusters need a FAT of %d sectors, more than BPB_FATSz16 holds: %w", count, newFAT, ErrResizeFAT)
-	}
 	if count < int64(fs.info.DataClusters) {
 		return fmt.Errorf("fat32: Grow: new size %d is too small: with the FAT grown to %d sectors it holds %d clusters, fewer than the %d the volume has: %w",
 			newSize, newFAT, count, fs.info.DataClusters, ErrResizeFAT)
@@ -189,6 +204,9 @@ func (fs *fat32FS) narrowGrowGeometry(newTotal int64) (fat, count int64, err err
 		}
 		need := ((count+2)*bits + 8*bps - 1) / (8 * bps)
 		if need <= fat {
+			if fat > 0xFFFF {
+				return 0, 0, fmt.Errorf("fat32: Grow: a FAT of %d sectors does not fit BPB_FATSz16: %w", fat, ErrResizeFAT)
+			}
 			return fat, count, nil
 		}
 		fat = need
