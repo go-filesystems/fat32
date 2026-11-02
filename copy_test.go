@@ -233,14 +233,14 @@ func TestCopyResizedAcrossTypes(t *testing.T) {
 	}
 }
 
-// For the same-type growth the in-place Grow refuses, and says where to go.
+// The same-type growth that needs a bigger FAT is done in place now; the type
+// change is still refused, and says where to go.
 func TestCopyResizedWhereGrowRefuses(t *testing.T) {
 	_, fs := f1216Writable(t, 16)
-	err := fs.Grow(48 << 20)
-	if !errors.Is(err, ErrResizeFATFull) || !strings.Contains(err.Error(), "CopyResized") {
+	if err := fs.Grow(48 << 20); err != nil {
 		t.Fatalf("Grow = %v", err)
 	}
-	err = fs.Grow(sizeForCount(fs, 65600))
+	err := fs.Grow(sizeForCount(fs, 65600))
 	if !errors.Is(err, ErrResizeType) || !strings.Contains(err.Error(), "CopyResized") {
 		t.Fatalf("Grow across the type = %v", err)
 	}

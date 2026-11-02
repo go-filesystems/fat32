@@ -85,7 +85,7 @@ func (fs *fat32FS) rootDir() uint32 {
 
 // ErrResizeFAT is the parent of every refusal of a FAT12/FAT16 resize; test it
 // with errors.Is. A FAT12/16 volume can be resized only while it keeps its FAT
-// type and its FAT keeps its size (see ErrResizeType and ErrResizeFATFull).
+// type (see ErrResizeType); its FAT grows with it when it must.
 var ErrResizeFAT = errors.New("fat32: this FAT12/FAT16 resize is not supported")
 
 // ErrResizeType is returned when the new size would put the data-cluster count
@@ -93,10 +93,10 @@ var ErrResizeFAT = errors.New("fat32: this FAT12/FAT16 resize is not supported")
 // change type, which needs a reformat, not a resize.
 var ErrResizeType = fmt.Errorf("%w: the FAT type would change", ErrResizeFAT)
 
-// ErrResizeFATFull is returned by Grow when the FAT has no room for the extra
-// clusters: the FATs sit before the fixed root directory and the data region,
-// so a bigger FAT would move both. That move is not done (an interrupted shift leaves an image no layout
-// describes): copy the tree into a new image with CopyResized.
+// ErrResizeFATFull was returned by Grow (v0.8.0, v0.9.0) when the FAT had no
+// room for the extra clusters. Since v0.10.0 Grow makes the FAT bigger in place
+// and this error is never returned; it stays so that callers that test for it
+// still compile.
 var ErrResizeFATFull = fmt.Errorf("%w: the FAT is too small for the new size", ErrResizeFAT)
 
 // eocMark is the end-of-chain value written into a FAT entry of the volume's
