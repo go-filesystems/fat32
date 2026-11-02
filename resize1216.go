@@ -93,7 +93,7 @@ func (fs *fat32FS) narrowResizeChecks(op string, newSize int64) (newTotal int64,
 // refuseTypeChange names both types when count would change the volume's.
 func (fs *fat32FS) refuseTypeChange(op, gerund string, count int64) error {
 	if t := typeOfCount(count); t != fs.info.Type {
-		return fmt.Errorf("fat32: %s: %s to %d clusters would make this %s volume %s; reformat instead: %w",
+		return fmt.Errorf("fat32: %s: %s to %d clusters would make this %s volume %s; copy it into a new image of that size with CopyResized (or reformat): %w",
 			op, gerund, count, fs.info.Type, t, ErrResizeType)
 	}
 	return nil
@@ -118,7 +118,7 @@ func (fs *fat32FS) growNarrow(newSize int64) error {
 		return err
 	}
 	if count > capacity {
-		return fmt.Errorf("fat32: Grow: %d clusters need a FAT of more than %d sectors (this one addresses %d); reformat instead: %w",
+		return fmt.Errorf("fat32: Grow: %d clusters need a FAT of more than %d sectors (this one addresses %d); copy it into a new image of that size with CopyResized (or reformat): %w",
 			count, fs.info.FATSize, capacity, ErrResizeFATFull)
 	}
 	t, ok := fs.f.(truncater)

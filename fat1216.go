@@ -95,7 +95,8 @@ var ErrResizeType = fmt.Errorf("%w: the FAT type would change", ErrResizeFAT)
 
 // ErrResizeFATFull is returned by Grow when the FAT has no room for the extra
 // clusters: the FATs sit before the fixed root directory and the data region,
-// so a bigger FAT would move both. That move is not done; reformat instead.
+// so a bigger FAT would move both. That move is not done (an interrupted shift leaves an image no layout
+// describes): copy the tree into a new image with CopyResized.
 var ErrResizeFATFull = fmt.Errorf("%w: the FAT is too small for the new size", ErrResizeFAT)
 
 // eocMark is the end-of-chain value written into a FAT entry of the volume's

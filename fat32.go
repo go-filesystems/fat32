@@ -61,6 +61,9 @@ type rootDirEntry struct {
 	name    string
 	attr    uint8
 	size    uint32
+	// short is the 8.3 record as it is on disk (set by parseRootDirMetadata): its
+	// timestamps are what CopyResized carries over.
+	short [dirEntrySize]byte
 }
 
 // Info holds the fields decoded from the FAT BIOS parameter block. Despite the
@@ -1545,12 +1548,14 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 		}
 		lfnChars = nil
 		lfnBad = false
-		entries = append(entries, rootDirEntry{
+		e := rootDirEntry{
 			cluster: uint32(le.Uint16(entry[20:22]))<<16 | uint32(le.Uint16(entry[26:28])),
 			name:    name,
 			attr:    entry[11],
 			size:    le.Uint32(entry[28:32]),
-		})
+		}
+		copy(e.short[:], entry)
+		entries = append(entries, e)
 	}
 	return entries
 }
