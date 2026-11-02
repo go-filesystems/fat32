@@ -27,7 +27,7 @@ Supports bare filesystem images and MBR/GPT partitioned disks, full directory tr
 | Grow / Shrink / Resize | ✅ | `filesystem.Resizer` — `Resize` dispatches to `Grow` or `Shrink` |
 | Partitioned images | ✅ | MBR/GPT supported |
 | FAT12 / FAT16 (read) | ✅ | `Open` / `OpenReader` read what `newfs_msdos -F 12\|16` and `mkfs.vfat` make below ~33 MiB, including `OpenFile` + `ReadAt`; see [FAT12 and FAT16](#fat12-and-fat16) |
-| FAT12 / FAT16 (write) | ✅ | everything, including `Resize`/`Grow`/`Shrink` while the FAT type and FAT size hold (`ErrResizeFAT` otherwise); the fixed root cannot grow, a full root refuses creates; see [FAT12 and FAT16](#fat12-and-fat16) |
+| FAT12 / FAT16 (write) | ✅ | everything, including `Resize`/`Grow`/`Shrink` while the FAT type and FAT size hold (`ErrResizeFAT` otherwise; `CopyResized` makes a bigger or other-type copy); the fixed root cannot grow, a full root refuses creates; see [FAT12 and FAT16](#fat12-and-fat16) |
 | fsck-clean images | ✅ | `fsck_msdos -n` (macOS) and `fsck.vfat -n` (dosfstools) exit 0 on what the driver writes: `..` of a directory under the root holds cluster 0, and the FSInfo free count and next-free hint are exact at format and kept current (written after each directory write and on `Close`; counted once per open, never per allocation, and never trusted from the image) |
 
 ## FAT12 and FAT16
@@ -74,10 +74,24 @@ against Linux `fs/fat/inode.c`:
   sector count fits 16 bits, else `BPB_TotSec32`. Refused, with `errors.Is(err,
   ErrResizeFAT)` and nothing changed: a resize that would change the type
   (`ErrResizeType`: "growing to N clusters would make this FAT16 volume FAT32;
-  reformat instead"), a grow that needs a bigger FAT (`ErrResizeFATFull`), zero
-  or negative sizes, sizes not a multiple of the sector size, and sector counts
-  beyond 32 bits. The boot sector is written last on grow and first on shrink,
-  so an interrupted resize leaves the old or the new size.
+  copy it into a new image of that size with CopyResized"), a grow that needs a
+  bigger FAT (`ErrResizeFATFull`), zero or negative sizes, sizes not a multiple
+  of the sector size, and sector counts beyond 32 bits. The boot sector is
+  written last on grow and first on shrink, so an interrupted resize leaves the
+  old or the new size.
+- **`CopyResized` does what an in-place resize cannot** (v0.9.0): a bigger FAT
+  or another FAT type. Growing the FAT in place would shift the fixed root and
+  every data cluster, and an interrupted shift leaves an image no layout
+  describes, so it is not done. `CopyResized(dst, size, src, CopyConfig{})`
+  formats `dst` fresh at `size` (the FAT type follows from the cluster count as
+  in `mkfs.fat`; `CopyConfig.Type` forces FAT12/16/32, and an impossible
+  combination is refused), then copies the whole tree of `src`: names (long ones
+  too), directories, contents, attributes, timestamps and the label. `src` is
+  only read, so it is unchanged on success and on failure. A tree that does not
+  fit (`ErrCopyNoFit`) or a root with more entries than a FAT12/16 fixed root
+  (`ErrCopyRootFull`, naming both counts) is refused before `dst` is written; if
+  a write fails half-way the error is returned and the boot sector of `dst` is
+  cleared so it is not taken for a volume.
 
 The test images in `testdata/` were formatted by `newfs_msdos` and populated by
 mtools (`testdata/mkfixtures`). After every mutation scenario the image is
