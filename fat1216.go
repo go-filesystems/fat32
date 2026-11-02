@@ -83,18 +83,20 @@ func (fs *fat32FS) rootDir() uint32 {
 	return fs.info.RootCluster
 }
 
-// ErrResizeFAT is returned by Resize, Grow and Shrink on a FAT12 or FAT16
-// volume: moving the data region and rewriting the FATs of the narrow
-// variants is not implemented. Reads and every other mutation are supported.
-var ErrResizeFAT = errors.New("fat32: resizing a FAT12/FAT16 volume is not supported")
+// ErrResizeFAT is the parent of every refusal of a FAT12/FAT16 resize; test it
+// with errors.Is. A FAT12/16 volume can be resized only while it keeps its FAT
+// type and its FAT keeps its size (see ErrResizeType and ErrResizeFATFull).
+var ErrResizeFAT = errors.New("fat32: this FAT12/FAT16 resize is not supported")
 
-// checkResizable refuses a resize of a FAT12/16 volume.
-func (fs *fat32FS) checkResizable() error {
-	if fs.info.fixedRoot() {
-		return ErrResizeFAT
-	}
-	return nil
-}
+// ErrResizeType is returned when the new size would put the data-cluster count
+// on the other side of a FAT type threshold (4085, 65525): the volume would
+// change type, which needs a reformat, not a resize.
+var ErrResizeType = fmt.Errorf("%w: the FAT type would change", ErrResizeFAT)
+
+// ErrResizeFATFull is returned by Grow when the FAT has no room for the extra
+// clusters: the FATs sit before the fixed root directory and the data region,
+// so a bigger FAT would move both. That move is not done; reformat instead.
+var ErrResizeFATFull = fmt.Errorf("%w: the FAT is too small for the new size", ErrResizeFAT)
 
 // eocMark is the end-of-chain value written into a FAT entry of the volume's
 // width (fatgen103: 0xFFF, 0xFFFF, 0x0FFFFFFF).

@@ -27,7 +27,7 @@ Supports bare filesystem images and MBR/GPT partitioned disks, full directory tr
 | Grow / Shrink / Resize | ✅ | `filesystem.Resizer` — `Resize` dispatches to `Grow` or `Shrink` |
 | Partitioned images | ✅ | MBR/GPT supported |
 | FAT12 / FAT16 (read) | ✅ | `Open` / `OpenReader` read what `newfs_msdos -F 12\|16` and `mkfs.vfat` make below ~33 MiB, including `OpenFile` + `ReadAt`; see [FAT12 and FAT16](#fat12-and-fat16) |
-| FAT12 / FAT16 (write) | ✅ | everything but `Resize`/`Grow`/`Shrink` (`ErrResizeFAT`); the fixed root cannot grow, a full root refuses creates; see [FAT12 and FAT16](#fat12-and-fat16) |
+| FAT12 / FAT16 (write) | ✅ | everything, including `Resize`/`Grow`/`Shrink` while the FAT type and FAT size hold (`ErrResizeFAT` otherwise); the fixed root cannot grow, a full root refuses creates; see [FAT12 and FAT16](#fat12-and-fat16) |
 | fsck-clean images | ✅ | `fsck_msdos -n` (macOS) and `fsck.vfat -n` (dosfstools) exit 0 on what the driver writes: `..` of a directory under the root holds cluster 0, and the FSInfo free count and next-free hint are exact at format and kept current (written after each directory write and on `Close`; counted once per open, never per allocation, and never trusted from the image) |
 
 ## FAT12 and FAT16
@@ -65,8 +65,19 @@ against Linux `fs/fat/inode.c`:
   the old chain is freed, a directory entry is removed before its clusters are
   freed, and a shrink writes the entry first. The worst an interruption leaves
   is clusters in use that nothing references (fsck reclaims them).
-- **`Resize`, `Grow` and `Shrink` are not supported on FAT12/16**: they return
-  `ErrResizeFAT` and change nothing.
+- **`Resize`, `Grow` and `Shrink` work on FAT12/16 while the volume keeps its
+  FAT type** (sizes are whole sectors). `Shrink` refuses while a cluster past
+  the new end is in use (nothing is relocated) and leaves the FAT at its size;
+  `Grow` works while the existing FAT has room for the new clusters (so shrink
+  then grow back always fits), because the FATs sit before the fixed root and
+  the data, and a bigger FAT would move both. `BPB_TotSec16` is used while the
+  sector count fits 16 bits, else `BPB_TotSec32`. Refused, with `errors.Is(err,
+  ErrResizeFAT)` and nothing changed: a resize that would change the type
+  (`ErrResizeType`: "growing to N clusters would make this FAT16 volume FAT32;
+  reformat instead"), a grow that needs a bigger FAT (`ErrResizeFATFull`), zero
+  or negative sizes, sizes not a multiple of the sector size, and sector counts
+  beyond 32 bits. The boot sector is written last on grow and first on shrink,
+  so an interrupted resize leaves the old or the new size.
 
 The test images in `testdata/` were formatted by `newfs_msdos` and populated by
 mtools (`testdata/mkfixtures`). After every mutation scenario the image is
