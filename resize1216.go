@@ -1,7 +1,6 @@
 package filesystem_fat32
 
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
 )
@@ -35,16 +34,13 @@ import (
 //     (fat_calc_align_sectors) to keep old and new clusters aligned; the FAT
 //     size comes from the same fixpoint as calc_sizes in calc.c, reproduced by
 //     narrowGrowGeometry. A shrink leaves the FAT at its size.
-//   - Crash window: step 1 (zero dead FAT slack) and step 2 (extend the image)
+//   - Crash safety: step 1 (zero dead FAT slack) and step 2 (extend the image)
 //     are invisible to the old volume. Steps 3-5 (move root+data, move FAT
-//     copies, zero FAT tails) overwrite the old layout in place; from the first
-//     of those writes until the boot sector write (step 6, the last write of the
-//     whole grow, one write per boot sector) the volume is NOT consistent: old
-//     BPB over a half-moved layout. Nothing short of a journal or a second copy
-//     of the data closes it. TestFAT1216GrowFailureAtEveryWrite fails every
-//     write in turn, asserts that the old volume is intact (fsck-clean, every
-//     hash) before the window opens and that the window ends at the last write,
-//     and that a completed grow is fsck-clean.
+//     copies, zero FAT tails) overwrite the old layout in place and are
+//     journaled and rolled forward by Open (growjournal.go): an interrupted grow
+//     is finished by the next Open, or never started when the record was not
+//     written. TestFAT1216GrowFailureAtEveryWrite fails every write in turn,
+//     reopens, and asserts the volume is fsck-clean with every hash intact.
 //   - Shrink refuses while any cluster past the new end is in use (as FAT32's
 //     Shrink does: nothing is relocated).
 //   - A resize that moves the cluster count across 4085 or 65525 changes the
@@ -166,19 +162,17 @@ func (fs *fat32FS) growNarrow(newSize int64) error {
 		return fmt.Errorf("fat32: Grow: truncate to %d: %w", newSize, err)
 	}
 	if newFAT != oldFAT {
-		// Steps 3-5 are the window (see the design note): the volume is not
-		// consistent until step 6.
-		if err := fs.moveNarrowLayout(oldFAT, newFAT); err != nil {
-			return fmt.Errorf("fat32: Grow: %w (the volume is inconsistent: the layout move was interrupted)", err)
+		// Steps 3-6: the journaled layout move (growjournal.go).
+		if err := fs.journaledGrow(newFAT, newTotal, newSize); err != nil {
+			return fmt.Errorf("fat32: Grow: %w (an interrupted grow is finished by the next Open)", err)
 		}
+	} else {
+		// One write per boot sector, the backup first, exposes the new total.
+		if err := fs.writeGeometry(uint32(newFAT), uint32(newTotal)); err != nil {
+			return fmt.Errorf("fat32: Grow: write boot sector: %w", err)
+		}
+		fs.info.TotalSectors = uint32(newTotal)
 	}
-	// Step 6: one write per boot sector, the backup first, exposes the whole
-	// new geometry (FAT size and total sectors together).
-	if err := fs.writeNarrowGeometry(uint32(newFAT), uint32(newTotal)); err != nil {
-		return fmt.Errorf("fat32: Grow: write boot sector: %w", err)
-	}
-	fs.info.FATSize = uint32(newFAT)
-	fs.info.TotalSectors = uint32(newTotal)
 	fs.info.DataClusters = uint32(count)
 	fs.invalidateFreeCount()
 	return nil
@@ -212,114 +206,6 @@ func (fs *fat32FS) narrowGrowGeometry(newTotal int64) (fat, count int64, err err
 		fat = need
 	}
 	return 0, 0, fmt.Errorf("fat32: Grow: the FAT size did not converge for %d sectors: %w", newTotal, ErrResizeFAT)
-}
-
-// moveChunk is the largest buffer the layout move allocates, whatever the
-// volume's size.
-const moveChunk = 64 << 10
-
-// moveForward copies n bytes from src to src+delta (delta > 0, ranges may
-// overlap) from the end backwards, in chunks, so no source byte is overwritten
-// before it is read.
-func (fs *fat32FS) moveForward(src, n, delta int64, buf []byte) error {
-	for n > 0 {
-		c := int64(len(buf))
-		if c > n {
-			c = n
-		}
-		n -= c
-		b := buf[:c]
-		if _, err := fs.f.ReadAt(b, src+n); err != nil {
-			return fmt.Errorf("read %d bytes at %d: %w", c, src+n, err)
-		}
-		if _, err := fs.f.WriteAt(b, src+n+delta); err != nil {
-			return fmt.Errorf("write %d bytes at %d: %w", c, src+n+delta, err)
-		}
-	}
-	return nil
-}
-
-// zeroRange writes n zero bytes at off, in chunks.
-func (fs *fat32FS) zeroRange(off, n int64, buf []byte) error {
-	clear(buf)
-	for n > 0 {
-		c := int64(len(buf))
-		if c > n {
-			c = n
-		}
-		if _, err := fs.f.WriteAt(buf[:c], off); err != nil {
-			return fmt.Errorf("zero %d bytes at %d: %w", c, off, err)
-		}
-		off += c
-		n -= c
-	}
-	return nil
-}
-
-// moveNarrowLayout re-lays a FAT12/16 volume out for a bigger FAT:
-//
-//	before: reserved | FAT0 | FAT1 ... | root | data
-//	after:  reserved | FAT0 + d | FAT1 + d ... | root | data   (shifted by delta)
-//
-// Step 3 moves root + data forward by delta = FATCount*(newFAT-oldFAT) sectors,
-// from the end backwards. Step 4 moves FAT copy i (from the last to 1) to its
-// new offset; the bytes it lands on are the stale old root/data start, already
-// moved. Step 5 zeroes the new tail of every FAT copy. Cluster numbers do not
-// change, so no FAT entry, directory entry or chain is rewritten.
-func (fs *fat32FS) moveNarrowLayout(oldFAT, newFAT int64) error {
-	info := fs.info
-	bps := int64(info.BytesPerSector)
-	n := int64(info.FATCount)
-	fatBase := int64(info.ReservedSectors) * bps
-	oldFATBytes := oldFAT * bps
-	newFATBytes := newFAT * bps
-	delta := n * (newFATBytes - oldFATBytes)
-	rootStart := fatBase + n*oldFATBytes
-	dataEnd := rootStart + int64(info.RootDirSectors())*bps +
-		int64(info.DataClusters)*int64(info.SectorsPerCluster)*bps
-	buf := make([]byte, moveChunk)
-	if err := fs.moveForward(rootStart, dataEnd-rootStart, delta, buf); err != nil {
-		return err
-	}
-	for i := n - 1; i >= 1; i-- {
-		if err := fs.moveForward(fatBase+i*oldFATBytes, oldFATBytes, i*(newFATBytes-oldFATBytes), buf); err != nil {
-			return err
-		}
-	}
-	for i := int64(0); i < n; i++ {
-		if err := fs.zeroRange(fatBase+i*newFATBytes+oldFATBytes, newFATBytes-oldFATBytes, buf); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// writeNarrowGeometry rewrites BPB_FATSz16 and the total-sector fields in one
-// write per boot sector; a backup, when there is one, goes first and the
-// primary last.
-func (fs *fat32FS) writeNarrowGeometry(fatSize, total uint32) error {
-	offs := fs.bootSectorOffsets()
-	for i := len(offs) - 1; i >= 0; i-- {
-		buf := make([]byte, fs.info.BytesPerSector)
-		if _, err := fs.f.ReadAt(buf, offs[i]); err != nil {
-			return fmt.Errorf("read boot sector at %d: %w", offs[i], err)
-		}
-		if buf[510] != 0x55 || buf[511] != 0xAA {
-			return fmt.Errorf("boot signature missing at %d", offs[i])
-		}
-		binary.LittleEndian.PutUint16(buf[22:24], uint16(fatSize))
-		if total <= 0xFFFF {
-			binary.LittleEndian.PutUint16(buf[19:21], uint16(total))
-			binary.LittleEndian.PutUint32(buf[32:36], 0)
-		} else {
-			binary.LittleEndian.PutUint16(buf[19:21], 0)
-			binary.LittleEndian.PutUint32(buf[32:36], total)
-		}
-		if _, err := fs.f.WriteAt(buf, offs[i]); err != nil {
-			return fmt.Errorf("write boot sector at %d: %w", offs[i], err)
-		}
-	}
-	return nil
 }
 
 // shrinkNarrow shrinks a FAT12/16 volume when no cluster past the new end is

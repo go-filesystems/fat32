@@ -78,15 +78,24 @@ against Linux `fs/fat/inode.c`:
   FAT16 volume FAT32; copy it into a new image of that size with
   CopyResized"), a grow too small to keep the clusters the volume has once its
   FAT has grown, zero or negative sizes, sizes not a multiple of the sector
-  size, and sector counts beyond 32 bits. **Crash window**: a grow that does
-  not need a bigger FAT, and a shrink, leave the old or the new size at any
-  interruption (the boot sector is written last on grow, first on shrink). A
-  grow that moves the layout is invisible to the old volume until its first
-  move; from then until its last write, the boot sector, the volume is not
-  consistent (the error says so). Take a copy first if that matters, or use
-  `CopyResized`, which never touches `src`.
+  size, and sector counts beyond 32 bits. **Crash safety** (v0.11.0): a grow
+  that does not need a bigger FAT, and a shrink, leave the old or the new size
+  at any interruption (the boot sector is written last on grow, first on
+  shrink). A grow that moves the layout (FAT12/16/32) is journaled and rolled
+  forward: it records its progress in the last sector of the image, and the next
+  `Open` / `OpenReader` over a writer finishes an interrupted grow before it
+  serves the volume, so every interruption ends as the old volume (the record
+  was never written) or the grown one, fsck-clean, every file intact. Until
+  that `Open`, a tool that does not know the record (`fsck_msdos`, the kernel)
+  sees a half-moved layout between the first move and the boot-sector
+  write. Over a read-only reader an interrupted volume is refused
+  (`ErrReadOnlyReader`). A grow too small to leave the record a free sector
+  past the moved layout is refused (`ErrGrowTooSmall`). With a backing store
+  that has `Sync`, each chunk of 256 KiB or more is flushed around its record;
+  below that the order holds for a process crash or an I/O error, not a power
+  loss mid-move. `CopyResized` never touches `src` at all.
 - **`CopyResized` does what an in-place resize cannot** (v0.9.0): another FAT
-  type, or a grow with no crash window. `CopyResized(dst, size, src, CopyConfig{})`
+  type, or a grow that leaves `src` untouched. `CopyResized(dst, size, src, CopyConfig{})`
   formats `dst` fresh at `size` (the FAT type follows from the cluster count as
   in `mkfs.fat`; `CopyConfig.Type` forces FAT12/16/32, and an impossible
   combination is refused), then copies the whole tree of `src`: names (long ones

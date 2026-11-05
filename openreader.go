@@ -42,7 +42,13 @@ func OpenReader(r io.ReaderAt, size int64) (filesystem.Filesystem, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fat32FS{f: readOnlyOrWritable(r), partOffset: 0, info: info}, nil
+	fs := &fat32FS{f: readOnlyOrWritable(r), partOffset: 0, info: info}
+	// An interrupted Grow is finished through the writer; over a reader that
+	// cannot write, that is an error, not a half-moved volume served.
+	if err := fs.openRecover(size, func() (Info, error) { return openReadInfo(readerAt{r}, 0) }); err != nil {
+		return nil, err
+	}
+	return fs, nil
 }
 
 // ErrReadOnlyReader is what a write gets when the filesystem was opened over

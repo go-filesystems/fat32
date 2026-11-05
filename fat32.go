@@ -172,7 +172,30 @@ func Open(imagePath string, partIndex int) (filesystem.Filesystem, error) {
 		f.Close()
 		return nil, err
 	}
-	return &fat32FS{f: f, partOffset: off, info: info}, nil
+	fs := &fat32FS{f: f, partOffset: off, info: info}
+	if err := fs.openRecover(deviceSize, func() (Info, error) { return openReadInfo(f, off) }); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return fs, nil
+}
+
+// openRecover finishes an interrupted Grow (growjournal.go) and re-reads the
+// boot sector when it did.
+func (fs *fat32FS) openRecover(size int64, reread func() (Info, error)) error {
+	before := fs.info
+	if err := fs.recoverGrow(size); err != nil {
+		return err
+	}
+	if fs.info == before {
+		return nil
+	}
+	info, err := reread()
+	if err != nil {
+		return err
+	}
+	fs.info = info
+	return nil
 }
 
 // Close writes the FSInfo free count if it changed and releases the
