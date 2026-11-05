@@ -132,6 +132,9 @@ func (fs *fat32FS) Grow(newSizeBytes int64) error {
 		}
 		return nil
 	}
+	if err := fs.markFSInfoUnknown(); err != nil {
+		return fmt.Errorf("fat32: Grow: %w", err)
+	}
 	if err := fs.writeGeometry(uint32(newFATSize), uint32(newTotalSectors)); err != nil {
 		return fmt.Errorf("fat32: Grow: write total sectors: %w", err)
 	}
@@ -353,20 +356,9 @@ func (fs *fat32FS) refreshFSInfo() error {
 	// The geometry may have changed: the cached count is recounted lazily on
 	// the next FAT change (see fsinfo.go).
 	fs.invalidateFreeCount()
-	if fs.info.FSInfoSector == 0 {
-		return nil
-	}
-	bytesPerSector := int64(fs.info.BytesPerSector)
-	off := fs.partOffset + int64(fs.info.FSInfoSector)*bytesPerSector
-
-	buf := make([]byte, bytesPerSector)
-	if _, err := fs.f.ReadAt(buf, off); err != nil {
-		return fmt.Errorf("read FSInfo at %d: %w", off, err)
-	}
-	if binary.LittleEndian.Uint32(buf[0:4]) != 0x41615252 ||
-		binary.LittleEndian.Uint32(buf[484:488]) != 0x61417272 ||
-		binary.LittleEndian.Uint32(buf[508:512]) != 0xAA550000 {
-		return nil
+	buf, off, err := fs.readFSInfoSector()
+	if buf == nil || err != nil {
+		return err
 	}
 
 	// Cluster count = data sectors / sectors per cluster. Using TotalSectors

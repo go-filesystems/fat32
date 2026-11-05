@@ -245,6 +245,9 @@ func (fs *fat32FS) finishGrow(p movePlan, j growJournal) error {
 	if err := fs.rebuildFATCopies(p, buf); err != nil {
 		return fmt.Errorf("rebuild FAT copies: %w", err)
 	}
+	if err := fs.markFSInfoUnknown(); err != nil {
+		return err
+	}
 	if err := fs.syncBacking(); err != nil {
 		return err
 	}
@@ -254,6 +257,41 @@ func (fs *fat32FS) finishGrow(p movePlan, j growJournal) error {
 	fs.info.FATSize = uint32(p.newFAT)
 	fs.info.TotalSectors = uint32(p.newTotal)
 	return fs.finishCommitted(p)
+}
+
+// readFSInfoSector returns the FSInfo sector and its offset, or a nil buffer when
+// the volume has none (FAT12/16, FSInfoSector 0) or the sector is not an FSInfo.
+func (fs *fat32FS) readFSInfoSector() ([]byte, int64, error) {
+	if fs.info.FSInfoSector == 0 {
+		return nil, 0, nil
+	}
+	bps := int64(fs.info.BytesPerSector)
+	off := fs.partOffset + int64(fs.info.FSInfoSector)*bps
+	buf := make([]byte, bps)
+	if _, err := fs.f.ReadAt(buf, off); err != nil {
+		return nil, 0, fmt.Errorf("read FSInfo at %d: %w", off, err)
+	}
+	if binary.LittleEndian.Uint32(buf[0:4]) != 0x41615252 ||
+		binary.LittleEndian.Uint32(buf[484:488]) != 0x61417272 ||
+		binary.LittleEndian.Uint32(buf[508:512]) != 0xAA550000 {
+		return nil, 0, nil
+	}
+	return buf, off, nil
+}
+
+// markFSInfoUnknown sets the FSInfo free count to 0xFFFFFFFF ("unknown", valid
+// per the FAT specification) before the geometry changes, so that a stop between
+// the commit and the recount leaves a count nobody can find wrong.
+func (fs *fat32FS) markFSInfoUnknown() error {
+	buf, off, err := fs.readFSInfoSector()
+	if buf == nil || err != nil {
+		return err
+	}
+	binary.LittleEndian.PutUint32(buf[488:492], 0xFFFFFFFF)
+	if _, err := fs.f.WriteAt(buf, off); err != nil {
+		return fmt.Errorf("write FSInfo at %d: %w", off, err)
+	}
+	return nil
 }
 
 // finishCommitted is step 5: what remains once the boot sector is the new one.

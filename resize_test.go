@@ -788,9 +788,14 @@ func TestResize_GrowFSInfoReadErr(t *testing.T) {
 	defer fs.Close()
 	bytesPerSector := int64(fs.info.BytesPerSector)
 	fsInfoOff := int64(fs.info.FSInfoSector) * bytesPerSector
+	reads := 0
 	disk.readErr = func(off int64) error {
+		// The first read is the "unknown" mark before the commit; the recount fails.
 		if off == fsInfoOff {
-			return errors.New("fsinfo read boom")
+			reads++
+			if reads > 1 {
+				return errors.New("fsinfo read boom")
+			}
 		}
 		return nil
 	}
