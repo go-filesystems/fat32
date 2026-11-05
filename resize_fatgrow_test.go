@@ -128,22 +128,20 @@ func TestFAT1216GrowFailureAtEveryWrite(t *testing.T) {
 		im, _ := f1216Fixture(t, typ)
 		_, base, bfs := growVolume(t, typ)
 		orig := int64(bfs.info.DataClusters)
-		rootStart := (int64(bfs.info.ReservedSectors) + int64(bfs.info.FATCount)*int64(bfs.info.FATSize)) * int64(bfs.info.BytesPerSector)
 		if err := bfs.Grow(sizeForCount(bfs, growCounts[typ])); err != nil {
 			t.Fatal(err)
 		}
 		total := len(base.offs)
-		first := total
-		for i, o := range base.offs {
-			if o >= rootStart {
-				first = i
-				break
-			}
+		jIdx := journalWriteIndex(t, base, bfs)
+		if jIdx >= total-1 {
+			t.Fatalf("FAT%d: %d writes, journal write at %d: no journaled move", typ, total, jIdx)
 		}
-		if first >= total-1 {
-			t.Fatalf("FAT%d: %d writes, first destructive %d: no window to measure", typ, total, first)
-		}
+		final := int64(bfs.info.DataClusters)
+		stride := ioStride(total)
 		for k := 0; k <= total; k++ {
+			if stride > 1 && k > 12 && k < total-12 && k%stride != 0 {
+				continue
+			}
 			path, lf, fs := growVolume(t, typ)
 			lf.writesLeft = k
 			opErr := fs.Grow(sizeForCount(fs, growCounts[typ]))
@@ -151,36 +149,101 @@ func TestFAT1216GrowFailureAtEveryWrite(t *testing.T) {
 			if (opErr == nil) != (k == total) {
 				t.Fatalf("FAT%d: failing at write %d of %d: %v", typ, k, total, opErr)
 			}
+			// Reopen: Open finishes an interrupted grow. The volume is either
+			// the old one (the journal was never written) or the new one, whole.
 			re, err := Open(path, -1)
-			if k >= first && k < total {
-				// The window: the volume is not promised consistent. Only the
-				// last write of all, the boot sector, ends it.
-				if err == nil {
-					re.Close()
-				}
-				continue
-			}
 			if err != nil {
 				t.Fatalf("FAT%d: failing at write %d: image does not open: %v", typ, k, err)
 			}
 			r := re.(*fat32FS)
-			want := orig
-			if k == total {
-				want = int64(fs.info.DataClusters)
+			got := int64(r.info.DataClusters)
+			if k > jIdx && got != final {
+				t.Fatalf("FAT%d: failing at write %d (journal written at %d): %d clusters, want %d", typ, k, jIdx, got, final)
 			}
-			if int64(r.info.DataClusters) != want {
-				t.Fatalf("FAT%d: failing at write %d: %d clusters, want %d", typ, k, r.info.DataClusters, want)
+			if k <= jIdx && got != orig {
+				t.Fatalf("FAT%d: failing at write %d (before the journal): %d clusters, want %d", typ, k, got, orig)
 			}
 			if leaks := checkVolume(t, r); leaks != 0 {
 				t.Fatalf("FAT%d: failing at write %d: %d leaked clusters", typ, k, leaks)
 			}
 			filesIntact(t, im, r)
 			r.Close()
-			if k == total {
-				fsckClean(t, path)
-			} else if k > 0 {
-				// An aborted early step left the old volume fsck-clean too.
-				fsckClean(t, path)
+			fsckClean(t, path)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := decodeGrowJournal(raw[len(raw)-int(fs.info.BytesPerSector):]); ok {
+				t.Fatalf("FAT%d: failing at write %d: the journal outlived the recovery", typ, k)
+			}
+		}
+	}
+}
+
+// journalWriteIndex is the index, among the writes of a finished grow, of the
+// first write to the last sector of the image: the journal record.
+func journalWriteIndex(t *testing.T, lf *logFaulty, fs *fat32FS) int {
+	t.Helper()
+	st, err := lf.File.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, o := range lf.offs {
+		if o == st.Size()-int64(fs.info.BytesPerSector) {
+			return i
+		}
+	}
+	t.Fatal("the grow never wrote a journal")
+	return 0
+}
+
+// A recovery interrupted at each of its own writes is itself finished by the next
+// Open: interrupt a grow after its first moved chunk, then fail the replay at
+// every write in turn.
+func TestFAT1216GrowRecoveryFailureAtEveryWrite(t *testing.T) {
+	for _, typ := range []int{12, 16} {
+		im, _ := f1216Fixture(t, typ)
+		_, base, bfs := growVolume(t, typ)
+		if err := bfs.Grow(sizeForCount(bfs, growCounts[typ])); err != nil {
+			t.Fatal(err)
+		}
+		stop := journalWriteIndex(t, base, bfs) + 2 // the record, then one chunk
+		stride := ioStride(len(base.offs))
+		for m := 0; m < len(base.offs); m++ {
+			if stride > 1 && m > 12 && m%stride != 0 {
+				continue
+			}
+			path, lf, fs := growVolume(t, typ)
+			lf.writesLeft = stop
+			if err := fs.Grow(sizeForCount(fs, growCounts[typ])); err == nil {
+				t.Fatal("the grow was not interrupted")
+			}
+			lf.File.Close()
+			raw, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := readInfo(raw, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rfs := &fat32FS{f: &resizeFaulty{File: raw, readsLeft: -1, writesLeft: m}, info: info}
+			st, _ := raw.Stat()
+			rerr := rfs.recoverGrow(st.Size())
+			raw.Close()
+			re, err := Open(path, -1)
+			if err != nil {
+				t.Fatalf("FAT%d: replay failing at write %d (%v): image does not open: %v", typ, m, rerr, err)
+			}
+			r := re.(*fat32FS)
+			if checkVolume(t, r) != 0 {
+				t.Fatalf("FAT%d: replay failing at write %d: leaked clusters", typ, m)
+			}
+			filesIntact(t, im, r)
+			r.Close()
+			fsckClean(t, path)
+			if rerr == nil {
+				break
 			}
 		}
 	}

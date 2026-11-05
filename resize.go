@@ -111,10 +111,7 @@ func (fs *fat32FS) Grow(newSizeBytes int64) error {
 	}
 
 	oldFATSize := int64(fs.info.FATSize)
-	oldClusterCount := int64(fs.info.TotalSectors) / int64(fs.info.SectorsPerCluster)
-	oldDataBase := fs.info.DataOffset(fs.partOffset)
-	newDataBase := fs.partOffset +
-		(int64(fs.info.ReservedSectors)+int64(fs.info.FATCount)*newFATSize)*bytesPerSector
+	// pickFATSize never returns less than oldFATSize.
 
 	t, ok := fs.f.(truncater)
 	if !ok {
@@ -126,35 +123,19 @@ func (fs *fat32FS) Grow(newSizeBytes int64) error {
 		return fmt.Errorf("fat32: Grow: truncate to %d: %w", newSizeBytes, err)
 	}
 
-	// If the FAT grew, every data cluster's byte offset shifts forward by
-	// the same delta. Walk clusters from highest to lowest so the source
-	// bytes are always read before being overwritten.
+	// A bigger FAT moves the FATs and the data forward: journaled, rolled
+	// forward by Open if interrupted (growjournal.go). Otherwise only the
+	// geometry changes, in one write per boot sector.
 	if newFATSize != oldFATSize {
-		if newFATSize < oldFATSize {
-			// Defensive: pickFATSize is bounded by oldFATSize, so this
-			// branch is unreachable. Guard against a future refactor.
-			return fmt.Errorf("fat32: Grow: newFATSize %d < oldFATSize %d (internal)", newFATSize, oldFATSize)
+		if err := fs.journaledGrow(newFATSize, newTotalSectors, newSizeBytes); err != nil {
+			return fmt.Errorf("fat32: Grow: %w (an interrupted grow is finished by the next Open)", err)
 		}
-		if err := fs.shiftDataRegion(oldDataBase, newDataBase, oldClusterCount, clusterSize); err != nil {
-			return fmt.Errorf("fat32: Grow: shift data region: %w", err)
-		}
-		// Mirror the old FAT contents into every FAT copy at its new offset.
-		// FAT0 stays put (its base offset is `reservedSectors*bytesPerSector`
-		// which is unchanged) but extends in size — its existing first
-		// `oldFATSize` sectors keep their content, and the new tail is
-		// already zero from Truncate. FAT1+ live at a moved offset, so
-		// copy the canonical FAT0 contents into each.
-		if err := fs.relocateFATCopies(oldFATSize, newFATSize); err != nil {
-			return fmt.Errorf("fat32: Grow: rebuild FAT copies: %w", err)
-		}
-		// Persist the new FAT size in the BPB.
-		if err := fs.writeFATSize(uint32(newFATSize)); err != nil {
-			return fmt.Errorf("fat32: Grow: write FAT size: %w", err)
-		}
-		fs.info.FATSize = uint32(newFATSize)
+		return nil
 	}
-
-	if err := fs.writeTotalSectors(uint32(newTotalSectors)); err != nil {
+	if err := fs.markFSInfoUnknown(); err != nil {
+		return fmt.Errorf("fat32: Grow: %w", err)
+	}
+	if err := fs.writeGeometry(uint32(newFATSize), uint32(newTotalSectors)); err != nil {
 		return fmt.Errorf("fat32: Grow: write total sectors: %w", err)
 	}
 	fs.info.TotalSectors = uint32(newTotalSectors)
@@ -301,111 +282,6 @@ func pickFATSize(totalSectors, reservedSectors, fatCount, sectorsPerCluster, byt
 	return 0, 0, fmt.Errorf("FAT size did not converge for totalSectors %d", totalSectors)
 }
 
-// shiftDataRegion copies every existing data cluster from its old byte
-// offset to its new byte offset. clusters are numbered identically before
-// and after; only oldBase and newBase differ. Walking from the highest
-// cluster down avoids overwriting unread bytes when newBase > oldBase.
-func (fs *fat32FS) shiftDataRegion(oldBase, newBase, clusterCount, clusterSize int64) error {
-	if newBase == oldBase || clusterCount == 0 {
-		return nil
-	}
-	cluster := make([]byte, clusterSize)
-	// Cluster numbers run 2..clusterCount+1 (cluster 2 lives at offset 0
-	// in the data region). We iterate the actual data range covered by
-	// the old layout — anything past that is freshly-allocated zero space.
-	for i := clusterCount - 1; i >= 0; i-- {
-		oldOff := oldBase + i*clusterSize
-		newOff := newBase + i*clusterSize
-		if _, err := fs.f.ReadAt(cluster, oldOff); err != nil {
-			return fmt.Errorf("read cluster at %d: %w", oldOff, err)
-		}
-		if _, err := fs.f.WriteAt(cluster, newOff); err != nil {
-			return fmt.Errorf("write cluster at %d: %w", newOff, err)
-		}
-	}
-	return nil
-}
-
-// relocateFATCopies rewrites every FAT copy to span newFATSize sectors. The
-// canonical contents are read from FAT0 (which occupies bytes
-// [reservedSectors*bytesPerSector, reservedSectors*bytesPerSector +
-// oldFATSize*bytesPerSector)) — exactly the bytes that Truncate left
-// untouched at the head of the FAT region. The new tail of every FAT copy
-// is left at zero (Truncate fills with zeros, which is also the FAT32
-// "free cluster" marker).
-//
-// For each FAT copy i ≥ 1, the new on-disk location is
-//
-//	reservedSectors*bytesPerSector + i*newFATSize*bytesPerSector
-//
-// so we copy the oldFATSize sectors of canonical content into that slot.
-func (fs *fat32FS) relocateFATCopies(oldFATSize, newFATSize int64) error {
-	bytesPerSector := int64(fs.info.BytesPerSector)
-	fat0Base := fs.info.FATOffset(fs.partOffset)
-	oldFATBytes := oldFATSize * bytesPerSector
-	newFATBytes := newFATSize * bytesPerSector
-
-	// Read the entire FAT0 once — it serves as the source for every copy.
-	// oldFATBytes is the boot sector's FAT size times the sector size: a claim
-	// of up to terabytes. readBacked proves the last byte exists first.
-	fat0, err := readBacked(fs.f, fat0Base, oldFATBytes)
-	if err != nil {
-		return fmt.Errorf("read FAT0: %w", err)
-	}
-
-	// FAT0 itself just needs its tail zeroed — but Truncate already did
-	// that, so no work. Copies 1+ live at moved offsets.
-	for i := int64(1); i < int64(fs.info.FATCount); i++ {
-		newOff := fat0Base + i*newFATBytes
-		if _, err := fs.f.WriteAt(fat0, newOff); err != nil {
-			return fmt.Errorf("write FAT%d at %d: %w", i, newOff, err)
-		}
-		// Zero the tail past the canonical content. Truncate already did
-		// this for byte ranges past EOF, but the bytes at
-		// [newOff+oldFATBytes, newOff+newFATBytes) used to be data-region
-		// content (now relocated) — they MUST be zeroed.
-		if newFATBytes > oldFATBytes {
-			zero := make([]byte, newFATBytes-oldFATBytes)
-			if _, err := fs.f.WriteAt(zero, newOff+oldFATBytes); err != nil {
-				return fmt.Errorf("zero FAT%d tail at %d: %w", i, newOff+oldFATBytes, err)
-			}
-		}
-	}
-	// FAT0's tail (bytes [fat0Base+oldFATBytes, fat0Base+newFATBytes))
-	// used to be either FAT1 content or freshly-allocated zero, depending
-	// on layout. Zero it explicitly so leftover FAT1 entries don't masquerade
-	// as in-use clusters on FAT0.
-	if newFATBytes > oldFATBytes {
-		zero := make([]byte, newFATBytes-oldFATBytes)
-		if _, err := fs.f.WriteAt(zero, fat0Base+oldFATBytes); err != nil {
-			return fmt.Errorf("zero FAT0 tail at %d: %w", fat0Base+oldFATBytes, err)
-		}
-	}
-	return nil
-}
-
-// writeFATSize rewrites BPB_FATSz32 (offset 36) in the primary and backup
-// boot sectors. The legacy 16-bit BPB_FATSz16 field at offset 22 is kept
-// at 0 — a FAT32 volume must have it zero.
-func (fs *fat32FS) writeFATSize(newSize uint32) error {
-	bootSize := int64(fs.info.BytesPerSector)
-	for _, off := range fs.bootSectorOffsets() {
-		buf := make([]byte, bootSize)
-		if _, err := fs.f.ReadAt(buf, off); err != nil {
-			return fmt.Errorf("read boot sector at %d: %w", off, err)
-		}
-		if buf[510] != 0x55 || buf[511] != 0xAA {
-			return fmt.Errorf("boot signature missing at %d", off)
-		}
-		binary.LittleEndian.PutUint16(buf[22:24], 0)
-		binary.LittleEndian.PutUint32(buf[36:40], newSize)
-		if _, err := fs.f.WriteAt(buf, off); err != nil {
-			return fmt.Errorf("write boot sector at %d: %w", off, err)
-		}
-	}
-	return nil
-}
-
 // currentSize returns the on-disk size of the backing file. For bare
 // images this is the entire file; for partitioned images it is the same
 // value, and Grow / Shrink refuse to operate in that case anyway.
@@ -480,20 +356,9 @@ func (fs *fat32FS) refreshFSInfo() error {
 	// The geometry may have changed: the cached count is recounted lazily on
 	// the next FAT change (see fsinfo.go).
 	fs.invalidateFreeCount()
-	if fs.info.FSInfoSector == 0 {
-		return nil
-	}
-	bytesPerSector := int64(fs.info.BytesPerSector)
-	off := fs.partOffset + int64(fs.info.FSInfoSector)*bytesPerSector
-
-	buf := make([]byte, bytesPerSector)
-	if _, err := fs.f.ReadAt(buf, off); err != nil {
-		return fmt.Errorf("read FSInfo at %d: %w", off, err)
-	}
-	if binary.LittleEndian.Uint32(buf[0:4]) != 0x41615252 ||
-		binary.LittleEndian.Uint32(buf[484:488]) != 0x61417272 ||
-		binary.LittleEndian.Uint32(buf[508:512]) != 0xAA550000 {
-		return nil
+	buf, off, err := fs.readFSInfoSector()
+	if buf == nil || err != nil {
+		return err
 	}
 
 	// Cluster count = data sectors / sectors per cluster. Using TotalSectors

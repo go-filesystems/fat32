@@ -717,7 +717,7 @@ func TestResize_GrowShiftWriteErr(t *testing.T) {
 	// FAT-copy write guarantees we trip during shiftDataRegion.
 	oldEnd := int64(fs.info.TotalSectors) * bytesPerSector
 	disk.writeErr = func(off int64) error {
-		if off > oldEnd {
+		if off > oldEnd/2 && off < resizeBigSize-512 { // data region, not the journal sector
 			return errors.New("shift write boom")
 		}
 		return nil
@@ -788,9 +788,14 @@ func TestResize_GrowFSInfoReadErr(t *testing.T) {
 	defer fs.Close()
 	bytesPerSector := int64(fs.info.BytesPerSector)
 	fsInfoOff := int64(fs.info.FSInfoSector) * bytesPerSector
+	reads := 0
 	disk.readErr = func(off int64) error {
+		// The first read is the "unknown" mark before the commit; the recount fails.
 		if off == fsInfoOff {
-			return errors.New("fsinfo read boom")
+			reads++
+			if reads > 1 {
+				return errors.New("fsinfo read boom")
+			}
 		}
 		return nil
 	}
@@ -886,7 +891,7 @@ func TestResize_WriteFATSizeBadSignature(t *testing.T) {
 	if _, err := fs.f.WriteAt(bad, 0); err != nil {
 		t.Fatalf("WriteAt: %v", err)
 	}
-	if err := fs.writeFATSize(fs.info.FATSize); err == nil ||
+	if err := fs.writeGeometry(fs.info.FATSize, fs.info.TotalSectors); err == nil ||
 		!strings.Contains(err.Error(), "boot signature missing") {
 		t.Errorf("writeFATSize with bad signature = %v, want boot-signature error", err)
 	}
@@ -1073,19 +1078,12 @@ func TestResize_PickFATSizeZeroMinFAT(t *testing.T) {
 	}
 }
 
-// TestResize_ShiftDataRegionNoop exercises shiftDataRegion's no-op
-// short-circuits.
-func TestResize_ShiftDataRegionNoop(t *testing.T) {
-	_, _, fs := openFaultFS(t, resizeBaseSize)
-	defer fs.Close()
-	// Same base → no-op.
-	if err := fs.shiftDataRegion(100, 100, 5, 4096); err != nil {
-		t.Errorf("shiftDataRegion(same base) = %v, want nil", err)
-	}
-	// Zero clusters → no-op.
-	if err := fs.shiftDataRegion(100, 200, 0, 4096); err != nil {
-		t.Errorf("shiftDataRegion(0 clusters) = %v, want nil", err)
-	}
+// relocateFATCopies runs the FAT-copy step of a layout move on its own.
+func (fs *fat32FS) relocateFATCopies(oldFAT, newFAT int64) error {
+	bps := int64(fs.info.BytesPerSector)
+	p := movePlan{n: int64(fs.info.FATCount), bps: bps, fatBase: fs.info.FATOffset(fs.partOffset),
+		oldFATBytes: oldFAT * bps, newFATBytes: newFAT * bps}
+	return fs.rebuildFATCopies(p, make([]byte, 64<<10))
 }
 
 // TestResize_RelocateFATCopiesReadErr fails the canonical FAT0 read in
@@ -1167,7 +1165,7 @@ func TestResize_WriteFATSizeReadErr(t *testing.T) {
 		}
 		return nil
 	}
-	if err := fs.writeFATSize(fs.info.FATSize); err == nil ||
+	if err := fs.writeGeometry(fs.info.FATSize, fs.info.TotalSectors); err == nil ||
 		!strings.Contains(err.Error(), "read boot sector") {
 		t.Errorf("writeFATSize read-fail = %v, want read-boot-sector wrap", err)
 	}
@@ -1374,22 +1372,20 @@ func TestResize_GrowRelocateFATError(t *testing.T) {
 func TestResize_GrowWriteTotalSectorsErr(t *testing.T) {
 	_, disk, fs := openFaultFS(t, resizeBaseSize)
 	defer fs.Close()
-	// Count writes at offset 0 (primary BPB). The first BPB write is the
-	// writeFATSize call (which writes at offset 0); the second is
-	// writeTotalSectors. Fail only the second.
-	bpbCalls := 0
+	// The primary BPB write is the commit; fail the journal clear that follows.
+	committed := false
 	disk.writeErr = func(off int64) error {
 		if off == 0 {
-			bpbCalls++
-			if bpbCalls >= 2 {
-				return errors.New("totsec write boom")
-			}
+			committed = true
+		}
+		if committed && off == resizeBigSize-512 {
+			return errors.New("clear write boom")
 		}
 		return nil
 	}
 	if err := fs.Grow(resizeBigSize); err == nil ||
-		!strings.Contains(err.Error(), "write total sectors") {
-		t.Errorf("Grow write-total-sectors = %v, want write-total-sectors wrap", err)
+		!strings.Contains(err.Error(), "clear journal") {
+		t.Errorf("Grow clear-journal = %v, want clear-journal wrap", err)
 	}
 }
 

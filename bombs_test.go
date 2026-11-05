@@ -131,15 +131,19 @@ func TestBomb_SectorSizeCeilingIsExact(t *testing.T) {
 	}
 }
 
-// The FAT size is a boot-sector claim; Resize reads the whole first FAT.
-func TestBomb_RelocateFATCopiesDoesNotReserveAFATTheImageLacks(t *testing.T) {
+// The FAT size and the journal are claims: a forged grow record in a small
+// image is refused before any buffer is sized from it.
+func TestBomb_GrowJournalDoesNotTrustAFATTheImageLacks(t *testing.T) {
 	info := Info{BytesPerSector: 512, SectorsPerCluster: 1, ReservedSectors: 1, FATCount: 2,
 		TotalSectors: 1 << 20, FATSize: 8, RootCluster: 2}
-	fs := newMockFS(make([]byte, 64<<10), info, 0)
+	img := make([]byte, 64<<10)
+	j := growJournal{oldFAT: 8, newFAT: 1 << 28, oldTotal: 1 << 20, newTotal: 1 << 28, remaining: 1 << 40, region: 1 << 40}
+	copy(img[len(img)-512:], j.encode(512))
+	fs := newMockFS(img, info, 0)
 	var err error
-	n := totalAlloc(func() { err = fs.relocateFATCopies(1<<28, 1<<28+8) })
+	n := totalAlloc(func() { err = fs.recoverGrow(int64(len(img))) })
 	if err == nil {
-		t.Error("a 128 GiB FAT was read from a 64 KiB image")
+		t.Error("a forged 128 GiB FAT grow was replayed in a 64 KiB image")
 	}
 	if n >= 1<<20 {
 		t.Errorf("allocated %d bytes before failing", n)
