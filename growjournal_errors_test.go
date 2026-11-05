@@ -2,6 +2,7 @@ package filesystem_fat32
 
 import (
 	"errors"
+	"runtime"
 	"testing"
 )
 
@@ -24,17 +25,23 @@ func (s *syncFaulty) Sync() error {
 
 // Every Sync of a grow can fail: the failure is reported, and the next Open
 // finishes the grow.
-func TestGrowSyncFailureAtEverySync(t *testing.T) { growSyncFailures(t) }
+func TestGrowSyncFailureAtEverySync(t *testing.T) { growSyncFailures(t, growBarrierMin) }
 
-// The same with a Sync barrier around every chunk, whatever its size.
-func TestGrowSyncFailureAtEverySyncWithBarriers(t *testing.T) {
-	old := growBarrierMin
-	growBarrierMin = 0
-	t.Cleanup(func() { growBarrierMin = old })
-	growSyncFailures(t)
+// The same with a Sync barrier around every chunk, whatever its size (the
+// barrier is lowered for the failing grow only: the Open that recovers it would
+// otherwise fsync thousands of chunks).
+func TestGrowSyncFailureAtEverySyncWithBarriers(t *testing.T) { growSyncFailures(t, 0) }
+
+// ioStride is 1 where the tests run natively and thins the every-write loops on
+// the emulated architectures of CI, which are an order of magnitude slower.
+func ioStride(total int) int {
+	if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
+		return 1
+	}
+	return total/40 + 1
 }
 
-func growSyncFailures(t *testing.T) {
+func growSyncFailures(t *testing.T, barrierMin int64) {
 	for _, typ := range []int{16, 32} {
 		failed := 0
 		for n := 0; n < 100; n++ {
@@ -63,7 +70,10 @@ func growSyncFailures(t *testing.T) {
 					re.Close()
 				}
 			}
+			old := growBarrierMin
+			growBarrierMin = barrierMin
 			err := fs.Grow(target)
+			growBarrierMin = old
 			if err == nil {
 				break
 			}

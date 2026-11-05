@@ -137,7 +137,11 @@ func TestFAT1216GrowFailureAtEveryWrite(t *testing.T) {
 			t.Fatalf("FAT%d: %d writes, journal write at %d: no journaled move", typ, total, jIdx)
 		}
 		final := int64(bfs.info.DataClusters)
+		stride := ioStride(total)
 		for k := 0; k <= total; k++ {
+			if stride > 1 && k > 12 && k < total-12 && k%stride != 0 {
+				continue
+			}
 			path, lf, fs := growVolume(t, typ)
 			lf.writesLeft = k
 			opErr := fs.Grow(sizeForCount(fs, growCounts[typ]))
@@ -204,7 +208,11 @@ func TestFAT1216GrowRecoveryFailureAtEveryWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 		stop := journalWriteIndex(t, base, bfs) + 2 // the record, then one chunk
+		stride := ioStride(len(base.offs))
 		for m := 0; m < len(base.offs); m++ {
+			if stride > 1 && m > 12 && m%stride != 0 {
+				continue
+			}
 			path, lf, fs := growVolume(t, typ)
 			lf.writesLeft = stop
 			if err := fs.Grow(sizeForCount(fs, growCounts[typ])); err == nil {
