@@ -7,7 +7,7 @@ go 1.27.1
 
 require (
 	github.com/go-filesystems/fat32 v0.5.1
-	github.com/go-filesystems/interface v0.5.0
+	github.com/go-filesystems/interface v0.6.0
 )
 
 require (
