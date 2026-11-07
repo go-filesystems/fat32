@@ -24,6 +24,7 @@ Supports bare filesystem images and MBR/GPT partitioned disks, full directory tr
 | ReadLink / Symlinks | ⚠️ No | FAT32 has no POSIX symlinks |
 | Volume label | ✅ | `Label` / `SetLabel` (`filesystem.Labeller`) |
 | Truncate | ✅ | `Truncate(path, newSize)` (`filesystem.Truncater`) |
+| Timestamps (read) | ✅ | `Times(path)` (`filesystem.TimesReader`): mtime 2 s, atime a date (24 h), birth time 10 ms, no ctime; local wall clock (`time.Local`); an all-zero or invalid field is "not recorded". Checked against entries written by `newfs_msdos` + mtools `mcopy -m` |
 | Grow / Shrink / Resize | ✅ | `filesystem.Resizer` — `Resize` dispatches to `Grow` or `Shrink` |
 | Partitioned images | ✅ | MBR/GPT supported |
 | FAT12 / FAT16 (read) | ✅ | `Open` / `OpenReader` read what `newfs_msdos -F 12\|16` and `mkfs.vfat` make below ~33 MiB, including `OpenFile` + `ReadAt`; see [FAT12 and FAT16](#fat12-and-fat16) |

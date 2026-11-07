@@ -1586,12 +1586,14 @@ func parseRootDirMetadata(buf []byte) []rootDirEntry {
 func toRootDirEntry(entry []byte) rootDirEntry {
 	clusterHigh := binary.LittleEndian.Uint16(entry[20:22])
 	clusterLow := binary.LittleEndian.Uint16(entry[26:28])
-	return rootDirEntry{
+	e := rootDirEntry{
 		cluster: uint32(clusterHigh)<<16 | uint32(clusterLow),
 		name:    shortName(entry),
 		attr:    entry[11],
 		size:    binary.LittleEndian.Uint32(entry[28:32]),
 	}
+	copy(e.short[:], entry) // Times decodes the timestamps from the record
+	return e
 }
 
 func (entry rootDirEntry) mode() uint16 {
