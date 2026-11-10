@@ -35,7 +35,7 @@ func BenchmarkGrowBiggerFAT(b *testing.B) {
 				grow += time.Since(t0)
 				fs.Close()
 
-				src, err := OpenReader(&rwBuf{img},int64(len(img)))
+				src, err := OpenReader(&rwBuf{img}, int64(len(img)))
 				if err != nil {
 					b.Fatal(err)
 				}

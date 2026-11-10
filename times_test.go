@@ -210,7 +210,7 @@ func entryWith(date, tod uint16, tenth uint8) []byte {
 // bit layout, the tenth byte, and every way a field can be absent or invalid.
 func TestDecodeFATTimes(t *testing.T) {
 	pinLocalUTC(t)
-	date := uint16(44<<9 | 5<<5 | 17) // 2024-05-17
+	date := uint16(44<<9 | 5<<5 | 17)  // 2024-05-17
 	tod := uint16(13<<11 | 45<<5 | 15) // 13:45:30
 	ft := decodeFATTimes(entryWith(date, tod, 135))
 	if m, _ := ft.Mtime.Get(); !m.Equal(time.Date(2024, 5, 17, 13, 45, 30, 0, time.UTC)) {
