@@ -24,6 +24,7 @@ Supports bare filesystem images and MBR/GPT partitioned disks, full directory tr
 | ReadLink / Symlinks | ⚠️ No | FAT32 has no POSIX symlinks |
 | Volume label | ✅ | `Label` / `SetLabel` (`filesystem.Labeller`) |
 | Truncate | ✅ | `Truncate(path, newSize)` (`filesystem.Truncater`) |
+| Timestamps (set) | ✅ | `Chtimes(path, atime, mtime)`: mtime written to 2 s (rounded down), atime as the local date; birth time untouched; a zero time leaves the field unchanged; local year outside 1980-2107 is refused with `*TimeRangeError` (`errors.Is(err, ErrTimeOutOfRange)`), nothing written. Read back by mtools `mdir`, volume accepted by `fsck_msdos`. The driver has no Chmod/Chown, so it is not a full `filesystem.MetadataSetter` |
 | Timestamps (read) | ✅ | `Times(path)` (`filesystem.TimesReader`): mtime 2 s, atime a date (24 h), birth time 10 ms, no ctime; local wall clock (`time.Local`); an all-zero or invalid field is "not recorded". Checked against entries written by `newfs_msdos` + mtools `mcopy -m` |
 | Grow / Shrink / Resize | ✅ | `filesystem.Resizer` — `Resize` dispatches to `Grow` or `Shrink` |
 | Partitioned images | ✅ | MBR/GPT supported |
