@@ -5,15 +5,26 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
+	"os"
 	"time"
+
+	filesystem "github.com/go-filesystems/interface"
 )
 
-// The driver has Chtimes but not Chmod or Chown (FAT has no owner, and the
-// attribute bits are a separate change), so it does not satisfy the bundled
-// filesystem.MetadataSetter; callers probe for the single method.
-var _ interface {
-	Chtimes(path string, atime, mtime time.Time) error
-} = (*fat32FS)(nil)
+var _ filesystem.MetadataSetter = (*fat32FS)(nil)
+
+// ErrNotSupported is what Chmod and Chown return: FAT records no owner and no
+// POSIX mode bits (only the read-only, hidden, system and archive attributes),
+// so there is nothing to store. It wraps errors.ErrUnsupported.
+var ErrNotSupported = fmt.Errorf("fat32: the format has no POSIX mode bits or owners: %w", errors.ErrUnsupported)
+
+// Chmod is part of filesystem.MetadataSetter, which the SMB, NFS and SFTP
+// servers probe for as a whole before they use Chtimes. FAT has no mode bits to
+// replace, so it always returns ErrNotSupported and writes nothing.
+func (fs *fat32FS) Chmod(path string, perm os.FileMode) error { return ErrNotSupported }
+
+// Chown returns ErrNotSupported: FAT records no owner. See Chmod.
+func (fs *fat32FS) Chown(path string, uid, gid uint32) error { return ErrNotSupported }
 
 // ErrTimeOutOfRange is what Chtimes returns, wrapped in a *TimeRangeError, for
 // a time the FAT date word cannot hold. FAT has a 7-bit year counted from 1980,
