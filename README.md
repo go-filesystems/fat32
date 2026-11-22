@@ -163,7 +163,7 @@ github.com/go-filesystems/fat32
 | WriteFile    | ✅ implemented |
 | MkDir        | ✅ implemented |
 | DeleteFile   | ✅ implemented |
-| DeleteDir    | ✅ implemented (recursive) |
+| DeleteDir    | ✅ implemented (recursive; the tree is checked first without recursion, and a directory cycle, a directory reachable twice or nesting deeper than `safeio.MaxTreeDepth` is refused with `safeio.ErrCycle` / `ErrTooDeep` before anything is changed) |
 | Rename       | ✅ implemented |
 | ReadLink     | ⚠️ stub — FAT32 has no symlinks |
 

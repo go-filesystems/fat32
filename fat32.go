@@ -444,6 +444,12 @@ func (fs *fat32FS) DeleteDir(path string) error {
 	}
 	firstCluster := uint32(binary.LittleEndian.Uint16(e8dot3[20:22]))<<16 |
 		uint32(binary.LittleEndian.Uint16(e8dot3[26:28]))
+	// Refuse a hostile directory graph BEFORE anything is changed.
+	if firstCluster >= 2 {
+		if err := fs.checkDirTree(firstCluster); err != nil {
+			return fmt.Errorf("fat32: DeleteDir %q: %w", path, err)
+		}
+	}
 	// Entry first (see DeleteFile), then the contents and the directory's own
 	// chain.
 	for i := 0; i < count; i++ {
@@ -1488,9 +1494,46 @@ func (fs *fat32FS) getParentDir(path string) (name string, parentCluster uint32,
 	return components[len(components)-1], parentCluster, nil
 }
 
+// fat32TreeNode is a directory entry seen by checkDirTree, identified by its
+// first cluster.
+type fat32TreeNode struct {
+	cluster uint32
+	dir     bool
+}
+
+// checkDirTree walks the tree under the directory at dirCluster WITHOUT
+// recursion, before deleteAllContents changes anything, and refuses an image
+// whose directories form a cycle (an entry naming an ancestor or the directory
+// itself), a directory reachable twice, or a nesting deeper than
+// safeio.MaxTreeDepth. Without it deleteAllContents recurses until the stack
+// overflows, a fatal error no recover() can catch.
+func (fs *fat32FS) checkDirTree(dirCluster uint32) error {
+	return safeio.PostOrder(fat32TreeNode{dirCluster, true},
+		func(n fat32TreeNode) (uint64, bool) { return uint64(n.cluster), n.dir },
+		func(n fat32TreeNode) ([]fat32TreeNode, error) {
+			// Only directories are ever nodes, so n.cluster is a directory.
+			buf, err := fs.readDirBuf(n.cluster)
+			if err != nil {
+				return nil, err
+			}
+			var kids []fat32TreeNode
+			for _, e := range parseRootDirMetadata(buf) {
+				if e.name == "." || e.name == ".." {
+					continue
+				}
+				if e.attr&fatAttrDirectory != 0 && e.cluster >= 2 {
+					kids = append(kids, fat32TreeNode{e.cluster, true})
+				}
+			}
+			return kids, nil
+		},
+		func(fat32TreeNode) error { return nil }, 0)
+}
+
 // deleteAllContents recursively removes all files and subdirectories inside
 // the directory at dirCluster, freeing their cluster chains. The directory
-// cluster itself is not freed; that is the caller's responsibility.
+// cluster itself is not freed; that is the caller's responsibility. Its
+// recursion is bounded by checkDirTree, which DeleteDir runs first.
 func (fs *fat32FS) deleteAllContents(dirCluster uint32) error {
 	buf, err := fs.readDirBuf(dirCluster)
 	if err != nil {
